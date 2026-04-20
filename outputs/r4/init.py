@@ -1,0 +1,1 @@
+"""In this folder all images outputs from this requirement will be saved"""
