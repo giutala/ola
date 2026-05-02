@@ -207,3 +207,23 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+.env
+
+# uv
+.uv/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Data & outputs (generated at runtime)
+data/picklefiles/
+outputs/
+
+# OS
+.DS_Store
