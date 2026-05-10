@@ -336,3 +336,310 @@ def plot_chosen_bids(agent, available_bids, title="Chosen Bids", filename="bids.
     logger.info("Saved plot to %s", path)
     plt.show()
     plt.close()
+
+# ---------------------------------------------------------------------------
+# Requirement 3 – Adversarial / dynamic clairvoyant
+# ---------------------------------------------------------------------------
+
+
+def compute_clairvoyant_dynamic_multi(
+    m_seq, values, bid_sets, budget, conflict_edges=None
+):
+    """
+    Best dynamic feasible sequence of bids in hindsight (project p.9).
+
+    Solves the offline LP that, knowing the entire sequence m_seq, chooses
+    a per-round bidding distribution maximising total utility under the
+    shared budget and the conflict graph.
+
+    LP formulation (relaxed)
+    ------------------------
+        max  sum_{t,i,k} y_{t,i,k} (v_i - b_{i,k}) I[b_{i,k} >= m_{t,i}]
+        s.t. sum_{t,i,k} y_{t,i,k} b_{i,k} I[b_{i,k} >= m_{t,i}] <= B
+             sum_k y_{t,i,k} <= 1                  for all t, i
+             sum_k y_{t,i,k} + sum_k y_{t,j,k} <= 1   for all t, (i,j) in E
+             0 <= y_{t,i,k} <= 1
+
+    Returns
+    -------
+    opt_utility_total      : float
+    opt_utility_per_round  : float
+    """
+    from scipy.sparse import csr_matrix
+
+    m_seq = np.asarray(m_seq)
+    N, T = m_seq.shape
+    values = np.asarray(values, dtype=float)
+    Ks = [len(bs) for bs in bid_sets]
+    offsets = [0] + list(np.cumsum(Ks))
+    NK = offsets[-1]
+    n_vars = T * NK
+    edges = conflict_edges or []
+
+    f_flat = np.zeros(n_vars)
+    c_flat = np.zeros(n_vars)
+    for t in range(T):
+        m_t = m_seq[:, t]
+        for i in range(N):
+            wins = bid_sets[i] >= m_t[i]
+            base = t * NK + offsets[i]
+            f_flat[base:base + Ks[i]] = (values[i] - bid_sets[i]) * wins
+            c_flat[base:base + Ks[i]] = bid_sets[i] * wins
+
+    rows, cols, data = [], [], []
+    nz = np.where(c_flat > 0)[0]
+    rows.extend([0] * len(nz)); cols.extend(nz.tolist()); data.extend(c_flat[nz].tolist())
+
+    row_idx = 1
+    for t in range(T):
+        for i in range(N):
+            base = t * NK + offsets[i]
+            rows.extend([row_idx] * Ks[i])
+            cols.extend(range(base, base + Ks[i]))
+            data.extend([1.0] * Ks[i])
+            row_idx += 1
+
+    for t in range(T):
+        for (ei, ej) in edges:
+            base_i = t * NK + offsets[ei]
+            base_j = t * NK + offsets[ej]
+            rows.extend([row_idx] * (Ks[ei] + Ks[ej]))
+            cols.extend(range(base_i, base_i + Ks[ei]))
+            cols.extend(range(base_j, base_j + Ks[ej]))
+            data.extend([1.0] * (Ks[ei] + Ks[ej]))
+            row_idx += 1
+
+    n_rows = row_idx
+    A_ub = csr_matrix((data, (rows, cols)), shape=(n_rows, n_vars))
+    b_ub = np.empty(n_rows)
+    b_ub[0] = budget
+    b_ub[1:] = 1.0
+
+    res = optimize.linprog(
+        -f_flat, A_ub=A_ub, b_ub=b_ub,
+        bounds=(0.0, 1.0), method="highs",
+    )
+
+    if not res.success:
+        logger.warning("Dynamic clairvoyant LP failed: %s", res.message)
+        return 0.0, 0.0
+
+    opt_total = -float(res.fun)
+    logger.info(
+        "Dynamic clairvoyant | T=%d N=%d total_utility=%.3f per_round=%.4f",
+        T, N, opt_total, opt_total / T,
+    )
+    return opt_total, opt_total / T
+
+
+# ---------------------------------------------------------------------------
+# Requirement 3 – Multi-trial runner with optional cache support
+# ---------------------------------------------------------------------------
+
+
+def run_primal_dual_trials(
+    env_factory, agent_factory, n_trials,
+    opt_per_round=None,
+    clairvoyant_cache=None,
+    name="req3",
+):
+    """
+    Multi-trial loop for the primal-dual agent (Requirement 3).
+
+    Three baseline modes (resolved per-trial in this priority order):
+
+      1. ``clairvoyant_cache[seed]`` is set
+         → use the precomputed dynamic clairvoyant for this seed.
+         Produced by ``precompute_clairvoyant.py``.  Each entry is either
+         a float (interpreted as ``opt_per_round``) or a dict with key
+         ``"opt_per_round"``.
+
+      2. ``opt_per_round`` is set (and not None)
+         → use it as a fixed per-round baseline across all trials.
+         Stochastic regime: cheap, computed once via
+         ``compute_clairvoyant_multi``.
+
+      3. Both are None
+         → compute the dynamic clairvoyant on the fly inside the trial
+         loop.  Adversarial regime without a cache: correct but slow.
+
+    Differences from ``run_multi_campaign_trials``
+    ----------------------------------------------
+    1. Calls ``agent.update(f_t, c_t, m_t)`` (full feedback).
+    2. Builds a fresh env per trial via ``env_factory(seed=i)``.
+    3. Tracks per-trial lambda trajectories (mean ± std).
+
+    Parameters
+    ----------
+    env_factory       : callable(seed: int) -> env
+    agent_factory     : callable() -> PrimalDualMultiCampaignAgent
+    n_trials          : int
+    opt_per_round     : float | None
+    clairvoyant_cache : dict[int, float | dict] | None
+        Seed → cached opt_per_round (or full result dict).  Loaded from
+        the pickle produced by ``precompute_clairvoyant.py``.
+    name              : str   pickle filename stem
+
+    Returns
+    -------
+    dict with keys:
+        mean_regret, std_regret  : (T,) arrays
+        mean_cumcost             : (T,) array
+        mean_lmbd, std_lmbd      : (T,) array
+        n_trials                 : int
+    """
+    if clairvoyant_cache is not None:
+        mode = f"adversarial (cache, {len(clairvoyant_cache)} entries)"
+    elif opt_per_round is not None:
+        mode = "stochastic (fixed OPT)"
+    else:
+        mode = "adversarial (per-trial dynamic OPT)"
+    logger.info("Running %d trials – %s — %s", n_trials, name, mode)
+
+    regret_per_trial   = []
+    payments_per_trial = []
+    lmbd_per_trial     = []
+
+    for i in range(n_trials):
+        np.random.seed(i)
+        env   = env_factory(seed=i)
+        agent = agent_factory()
+
+        # Per-trial baseline resolution
+        trial_opt = _resolve_trial_opt(
+            seed=i,
+            cache=clairvoyant_cache,
+            fixed=opt_per_round,
+            env=env,
+        )
+
+        utilities = np.zeros(env.T)
+        costs     = np.zeros(env.T)
+
+        for t in range(env.T):
+            A_t = agent.pull_arm()
+            f_t, c_t, m_t = env.round(A_t)
+            agent.update(f_t, c_t, m_t)
+            utilities[t] = f_t.sum()
+            costs[t]     = c_t.sum()
+
+        regret_per_trial.append(np.cumsum(trial_opt - utilities))
+        payments_per_trial.append(np.cumsum(costs))
+
+        lmbds = np.asarray(agent.lmbds_history, dtype=float)
+        if lmbds.size < env.T:
+            pad_value = lmbds[-1] if lmbds.size > 0 else 0.0
+            lmbds = np.pad(lmbds, (0, env.T - lmbds.size), constant_values=pad_value)
+        lmbd_per_trial.append(lmbds[:env.T])
+
+    regret_per_trial   = np.array(regret_per_trial)
+    payments_per_trial = np.array(payments_per_trial)
+    lmbd_per_trial     = np.array(lmbd_per_trial)
+
+    out = dict(
+        mean_regret  = regret_per_trial.mean(axis=0),
+        std_regret   = regret_per_trial.std(axis=0),
+        mean_cumcost = payments_per_trial.mean(axis=0),
+        mean_lmbd    = lmbd_per_trial.mean(axis=0),
+        std_lmbd     = lmbd_per_trial.std(axis=0),
+        n_trials     = n_trials,
+    )
+    path = DATA_DIR / f"{name}_results.pkl"
+    with open(path, "wb") as f:
+        pickle.dump(out, f)
+    logger.info("Saved results to %s", path)
+    return out
+
+
+def _resolve_trial_opt(seed, cache, fixed, env):
+    """
+    Pick the per-round baseline for a single trial.
+
+    Priority: cache hit > fixed > on-the-fly LP.
+    """
+    if cache is not None and seed in cache:
+        entry = cache[seed]
+        if isinstance(entry, dict):
+            return float(entry["opt_per_round"])
+        return float(entry)        # plain float
+
+    if fixed is not None:
+        return float(fixed)
+
+    # Fallback: compute now
+    if cache is not None:
+        logger.warning("Cache miss for seed=%d, computing dynamic OPT on the fly.",
+                       seed)
+    _, trial_opt = compute_clairvoyant_dynamic_multi(
+        m_seq          = env.m,
+        values         = env.values,
+        bid_sets       = env.bid_sets,
+        budget         = env.budget,
+        conflict_edges = env.conflict_edges,
+    )
+    return trial_opt
+
+
+# ---------------------------------------------------------------------------
+# Cache loader -- convenience wrapper
+# ---------------------------------------------------------------------------
+
+
+def load_clairvoyant_cache(path_or_key):
+    """
+    Load a clairvoyant cache produced by precompute_clairvoyant.py.
+
+    Parameters
+    ----------
+    path_or_key : str | Path
+        Either an absolute path to the pickle, or just the 12-char hex
+        key (the script will look for it in DATA_DIR).
+
+    Returns
+    -------
+    dict[int, dict]  seed → {opt_total, opt_per_round}, or {} if missing.
+    """
+    p = Path(path_or_key)
+    if not p.is_absolute() and not p.exists():
+        # Treat as a key
+        p = DATA_DIR / f"clairvoyant_dyn_{path_or_key}.pkl"
+    if not p.exists():
+        logger.warning("No cache at %s — returning empty dict.", p)
+        return {}
+    with open(p, "rb") as f:
+        cache = pickle.load(f)
+    logger.info("Loaded clairvoyant cache from %s (%d entries)", p, len(cache))
+    return cache
+
+
+# ---------------------------------------------------------------------------
+# Requirement 3 – Lambda trajectory plot (NB08 style)
+# ---------------------------------------------------------------------------
+
+
+def plot_lambda(results, title="Lagrange multiplier $\\lambda_t$",
+                filename="lambda.png"):
+    """
+    NB08 cell 17 pattern: plot lambda over time, one line per agent.
+    """
+    fig, ax = plt.subplots(figsize=(9, 5))
+    T = len(next(iter(results.values()))["mean_lmbd"])
+    ts = np.arange(1, T + 1)
+
+    for label, res in results.items():
+        mean = res["mean_lmbd"]
+        stderr = res["std_lmbd"] / np.sqrt(res["n_trials"])
+        ax.plot(ts, mean, label=label)
+        ax.fill_between(ts, mean - stderr, mean + stderr, alpha=0.3)
+
+    ax.set_xlabel("$t$")
+    ax.set_ylabel("$\\lambda_t$")
+    ax.set_title(title)
+    ax.legend()
+    ax.grid(True, linestyle="--", alpha=0.4)
+    plt.tight_layout()
+    path = OUTPUTS_DIR / filename
+    plt.savefig(path, dpi=150)
+    logger.info("Saved plot to %s", path)
+    plt.show()
+    plt.close()
