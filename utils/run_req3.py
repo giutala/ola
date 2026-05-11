@@ -1,0 +1,236 @@
+"""
+run_req3.py
+-----------
+Requirement 3: best-of-both-worlds bidding for N campaigns.
+
+Algorithm: PrimalDualMultiCampaignAgent — Hedge as primal regret minimiser
+(one per campaign, full feedback) coupled to a shared OGD step on the dual
+variable lambda.  Conflicts are enforced both by MultiCampaignEnv.round and
+by the suppression rule applied to Hedge counterfactual rewards (NB08
+pattern).
+
+Two experiments
+---------------
+A. Stochastic environment (MultiCampaignEnv, NB07 setup) — baseline is the
+   fixed LP optimum (compute_clairvoyant_multi).  No LP solved per trial.
+
+B. Adversarial / non-stationary environment
+   (AdversarialMultiCampaignEnv) — baseline is the best dynamic feasible
+   sequence in hindsight (compute_clairvoyant_dynamic_multi), computed
+   per trial.  If a cache produced by precompute_clairvoyant.py is
+   available it is used; otherwise the LP is solved on the fly (slow).
+
+T=10_000 matches R1 / R2 for a valid cross-requirement regret comparison.
+B scaled so rho=0.16 is unchanged.
+
+Call from the notebook: run_req3()
+"""
+
+import logging
+
+import numpy as np
+import matplotlib.pyplot as plt
+
+from agents import PrimalDualMultiCampaignAgent
+from environments import MultiCampaignEnv, AdversarialMultiCampaignEnv
+from experiments import (
+    compute_clairvoyant_multi,
+    load_clairvoyant_cache,
+    plot_budget,
+    plot_lambda,
+    plot_regret,
+    run_primal_dual_trials,
+    OUTPUTS_DIR,
+)
+
+logger = logging.getLogger(__name__)
+
+# ── Parameters ──────────────────────────────────────────────────────────────
+VALUES         = [0.8, 0.6, 0.9, 0.7]
+T              = 10_000
+BUDGET         = 1_600.0                # rho = 0.16, matches R1/R2
+N_TRIALS       = 20
+N_COMPETITORS  = [3, 3, 3, 3]
+CONFLICT_EDGES = [(0, 1), (2, 3)]
+AVAILABLE_BIDS = np.linspace(0, 1, 11)
+
+# Cache key (12-char hex) produced by precompute_clairvoyant.py.
+# Set to None to skip the cache; the runner will fall back to live LPs
+# (slow but correct).  See precompute_clairvoyant.py logs for the value.
+CLAIRVOYANT_CACHE_KEY = None
+
+
+def run_req3():
+    """Single entry point called from the notebook."""
+    logger.info("=" * 60)
+    logger.info("Requirement 3 – Best-of-both-worlds bidding")
+    logger.info("=" * 60)
+    logger.info(
+        "Parameters | N=%d T=%d B=%.1f rho=%.4f conflict_edges=%s",
+        len(VALUES), T, BUDGET, BUDGET / T, CONFLICT_EDGES,
+    )
+
+    # ── Factories shared across the two experiments ───────────────────────
+    # We freeze a "reference" env (seed=0) only to read Ks and bid_sets,
+    # which are deterministic functions of values + AVAILABLE_BIDS and
+    # therefore the same for every trial.
+    _env_ref_stoch = MultiCampaignEnv(
+        values=VALUES, budget=BUDGET, T=T,
+        available_bids=AVAILABLE_BIDS, n_competitors=N_COMPETITORS,
+        conflict_edges=CONFLICT_EDGES, seed=0,
+    )
+    BID_SETS = _env_ref_stoch.bid_sets
+    KS       = _env_ref_stoch.Ks
+    N        = _env_ref_stoch.N
+
+    def make_agent():
+        return PrimalDualMultiCampaignAgent(
+            N=N, Ks=KS, bid_sets=BID_SETS,
+            T=T, budget=BUDGET, values=VALUES,
+            conflict_edges=CONFLICT_EDGES,
+        )
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Experiment A – Stochastic
+    # ─────────────────────────────────────────────────────────────────────
+    logger.info("-" * 60)
+    logger.info("Experiment A – Stochastic environment")
+    logger.info("-" * 60)
+
+    def env_factory_stoch(seed):
+        return MultiCampaignEnv(
+            values=VALUES, budget=BUDGET, T=T,
+            available_bids=AVAILABLE_BIDS, n_competitors=N_COMPETITORS,
+            conflict_edges=CONFLICT_EDGES, seed=seed,
+        )
+
+    # Stochastic baseline: fixed LP optimum.  Computed once.
+    win_probs = _env_ref_stoch.win_probabilities()
+    _, opt_stoch = compute_clairvoyant_multi(
+        np.array(VALUES), BID_SETS, BUDGET / T, win_probs, CONFLICT_EDGES,
+    )
+    logger.info("Stochastic clairvoyant | per-round utility = %.4f", opt_stoch)
+
+    res_stoch = run_primal_dual_trials(
+        env_factory   = env_factory_stoch,
+        agent_factory = make_agent,
+        n_trials      = N_TRIALS,
+        opt_per_round = opt_stoch,            # Mode B: fixed baseline
+        name          = "req3_stochastic",
+    )
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Experiment B – Adversarial / non-stationary
+    # ─────────────────────────────────────────────────────────────────────
+    logger.info("-" * 60)
+    logger.info("Experiment B – Non-stationary environment")
+    logger.info("-" * 60)
+
+    def env_factory_adv(seed):
+        return AdversarialMultiCampaignEnv(
+            values=VALUES, budget=BUDGET, T=T,
+            available_bids=AVAILABLE_BIDS, n_competitors=N_COMPETITORS,
+            conflict_edges=CONFLICT_EDGES, seed=seed,
+        )
+
+    # Try to use the cache produced by precompute_clairvoyant.py.
+    cache = {}
+    if CLAIRVOYANT_CACHE_KEY is not None:
+        cache = load_clairvoyant_cache(CLAIRVOYANT_CACHE_KEY)
+    if not cache:
+        logger.warning(
+            "No clairvoyant cache loaded — the dynamic LP will be solved "
+            "on the fly for each trial (slow).  Run precompute_clairvoyant.py "
+            "and set CLAIRVOYANT_CACHE_KEY to skip this."
+        )
+
+    res_adv = run_primal_dual_trials(
+        env_factory       = env_factory_adv,
+        agent_factory     = make_agent,
+        n_trials          = N_TRIALS,
+        clairvoyant_cache = cache or None,    # Mode A if cache, Mode C otherwise
+        name              = "req3_adversarial",
+    )
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Comparison plots
+    # ─────────────────────────────────────────────────────────────────────
+    logger.info("-" * 60)
+    logger.info("Plotting")
+    logger.info("-" * 60)
+
+    results = {
+        "Primal-Dual (stochastic)":   res_stoch,
+        "Primal-Dual (adversarial)":  res_adv,
+    }
+
+    plot_regret(
+        results=results,
+        title="Req 3 – Cumulative Pseudo-Regret: Best-of-both-worlds",
+        filename="req3_regret.png",
+        add_reference=True,
+    )
+    plot_budget(
+        results=results, budget=BUDGET,
+        title="Req 3 – Cumulative Cost",
+        filename="req3_budget.png",
+    )
+    plot_lambda(
+        results=results,
+        title="Req 3 – Lagrange multiplier $\\lambda_t$",
+        filename="req3_lambda.png",
+    )
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Annotated regret: highlight that the SAME agent achieves sublinear
+    # regret in BOTH regimes.  This is the punchline of Requirement 3.
+    # ─────────────────────────────────────────────────────────────────────
+    fig, ax = plt.subplots(figsize=(9, 5))
+    ts = np.arange(1, T + 1)
+    for label, res, color in [
+        ("Stochastic",  res_stoch, "C0"),
+        ("Adversarial", res_adv,   "C1"),
+    ]:
+        mean   = res["mean_regret"]
+        stderr = res["std_regret"] / np.sqrt(res["n_trials"])
+        ax.plot(ts, mean, label=label, color=color)
+        ax.fill_between(ts, mean - stderr, mean + stderr, alpha=0.25, color=color)
+
+    # O(sqrt(T)) reference, scaled to the adversarial curve (the harder one)
+    ref = np.sqrt(ts)
+    ref = ref * (res_adv["mean_regret"][-1] / ref[-1])
+    ax.plot(ts, ref, "k--", linewidth=1.2, label=r"$O(\sqrt{T})$")
+
+    ax.set_xlabel("$t$")
+    ax.set_ylabel("Cumulative Pseudo-Regret")
+    ax.set_title("Req 3 – Best-of-both-worlds: same agent, two regimes")
+    ax.legend()
+    ax.grid(True, linestyle="--", alpha=0.4)
+    plt.tight_layout()
+    path = OUTPUTS_DIR / "req3_regret_annotated.png"
+    plt.savefig(path, dpi=150)
+    logger.info("Saved annotated plot to %s", path)
+    plt.show()
+    plt.close()
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Final summary
+    # ─────────────────────────────────────────────────────────────────────
+    logger.info("=" * 60)
+    logger.info("Final pseudo-regret (mean over %d trials):", N_TRIALS)
+    logger.info("  Stochastic   : %.2f", res_stoch["mean_regret"][-1])
+    logger.info("  Adversarial  : %.2f", res_adv["mean_regret"][-1])
+    logger.info("Final cumulative cost:")
+    logger.info("  Stochastic   : %.2f / %.0f",
+                res_stoch["mean_cumcost"][-1], BUDGET)
+    logger.info("  Adversarial  : %.2f / %.0f",
+                res_adv["mean_cumcost"][-1], BUDGET)
+    logger.info("=" * 60)
+    logger.info("Requirement 3 complete.")
+
+    return {"stochastic": res_stoch, "adversarial": res_adv}
+
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(message)s")
+    run_req3()
