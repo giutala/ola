@@ -1,0 +1,139 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[italian]{babel}
+\usepackage{amsmath,amssymb}
+\usepackage{geometry}
+\usepackage{hyperref}
+
+\geometry{margin=2.5cm}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{0.6em}
+\hypersetup{
+  colorlinks=true,
+  linkcolor=black,
+  urlcolor=blue
+}
+
+\title{Verifica e Correzioni dei Requisiti 1 e 2}
+\author{Progetto Online Learning Applications}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+\section{Sintesi}
+
+Sono stati verificati i requisiti 1 e 2 del progetto rispetto al codice del
+branch \texttt{giulia}. Il requisito 1 era gia' sostanzialmente soddisfatto. Il
+requisito 2 era implementato solo parzialmente, perche' la versione precedente
+del Combinatorial-UCB poteva generare azioni realizzate che violavano il conflict
+graph. Il codice e' stato corretto introducendo una distribuzione su azioni
+congiunte ammissibili.
+
+\section{Requirement 1: singola campagna in ambiente stocastico}
+
+Il requisito 1 richiede:
+\begin{itemize}
+  \item un ambiente stocastico per una singola campagna;
+  \item una strategia UCB1 che ignora il vincolo di budget;
+  \item una strategia UCB-like che gestisce il vincolo di budget.
+\end{itemize}
+
+\subsection{Stato del codice}
+
+Il codice soddisfa il requisito. La classe \texttt{SingleCampaignEnv}
+implementa una first-price auction in cui il massimo bid concorrente e' generato
+come massimo di bid i.i.d. uniformi. Di conseguenza, la probabilita' di vincita
+per un bid fissato e' descritta dalla distribuzione Beta usata nel clairvoyant.
+
+La classe \texttt{UCB1BiddingAgent} implementa UCB1 ignorando i costi. La classe
+\texttt{UCBLikeBiddingAgent} mantiene stime ottimistiche della reward, stime
+pessimistiche del costo e risolve un LP per scegliere una distribuzione sui bid
+ammissibile rispetto al budget medio
+\[
+  \rho = \frac{B}{T}.
+\]
+
+\subsection{Miglioramenti consigliati}
+
+Per rendere la valutazione piu' completa, e' utile riportare separatamente un
+caso con budget non vincolante e uno con budget vincolante, mostrando sia regret
+sia costo cumulato. Questa scelta e' gia' presente nella pipeline
+\texttt{run\_req1.py}.
+
+\section{Requirement 2: campagne multiple in ambiente stocastico}
+
+Il requisito 2 richiede:
+\begin{itemize}
+  \item un ambiente stocastico multi-campagna;
+  \item una distribuzione congiunta sui massimi bid concorrenti;
+  \item una strategia Combinatorial-UCB con vincolo di budget.
+\end{itemize}
+
+\subsection{Problema individuato}
+
+La prima versione del codice risolveva un LP con variabili marginali
+\(x_{ik}\), una per ogni coppia campagna--bid, e aggiungeva vincoli per budget e
+conflitti. Tuttavia la scelta finale veniva campionata indipendentemente per
+ogni campagna. Questo poteva produrre azioni realizzate non ammissibili:
+campagne collegate da un arco di conflitto potevano ricevere entrambe un bid
+nello stesso round.
+
+Il problema era ancora piu' evidente nella fase di fallback iniziale, dove
+l'agente sceglieva greedy una bid per ogni campagna, ignorando i conflitti.
+
+\subsection{Correzione applicata}
+
+La classe \texttt{CombinatorialUCBAgent} ora enumera lo spazio delle azioni
+congiunte ammissibili. Ogni azione congiunta specifica, per ciascuna campagna,
+un bid oppure l'astensione \(-1\), e viene costruita in modo da rispettare
+sempre il conflict graph.
+
+L'LP non sceglie piu' marginali indipendenti, ma una distribuzione \(\gamma\) su
+azioni congiunte:
+\[
+  \max_{\gamma} \sum_{a \in \mathcal{A}} \gamma_a \, \widehat{f}^{UCB}(a)
+\]
+soggetta a
+\[
+  \sum_{a \in \mathcal{A}} \gamma_a \, \widehat{c}^{LCB}(a) \leq \rho,
+  \qquad
+  \sum_{a \in \mathcal{A}} \gamma_a = 1,
+  \qquad
+  \gamma_a \geq 0.
+\]
+
+Poiche' ogni \(a \in \mathcal{A}\) e' gia' fattibile, i vincoli di
+incompatibilita' sono rispettati in ogni round realizzato, non solo in valore
+atteso.
+
+\subsection{Correzione del clairvoyant}
+
+Anche il clairvoyant multi-campagna e' stato aggiornato per risolvere un LP
+sullo stesso spazio di azioni congiunte ammissibili. In questo modo il regret
+empirico confronta l'agente con un benchmark coerente con i vincoli del
+problema.
+
+\subsection{Correzione dell'ambiente}
+
+L'ambiente \texttt{MultiCampaignEnv} ora rifiuta esplicitamente una bid vector
+che assegna bid simultaneamente a due campagne incompatibili. Questo rende
+visibile qualsiasi violazione del modello invece di correggerla a posteriori
+scartando una delle due vittorie.
+
+\section{Conclusione}
+
+Dopo la correzione, il requisito 2 e' soddisfatto in modo piu' fedele:
+\begin{itemize}
+  \item la distribuzione dei massimi bid concorrenti e' una distribuzione
+  congiunta prodotto sulle campagne;
+  \item il budget e' gestito tramite LP;
+  \item le campagne incompatibili non possono piu' ricevere bid nello stesso
+  round;
+  \item il clairvoyant e l'agente usano lo stesso spazio di azioni ammissibili.
+\end{itemize}
+
+\end{document}

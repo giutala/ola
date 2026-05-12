@@ -196,19 +196,23 @@ class CombinatorialUCBAgent:
     Structure mirrors UCBMatchingAgent (NB09 cell 30):
       - avg_f[i,k], avg_c[i,k], N_pulls[i,k] track each (campaign, bid) pair
       - unexplored arms get large_value = (1 + sqrt(2*log(T)/1))*10  (NB09 cell 30)
-      - oracle = LP (instead of linear_sum_assignment) to handle the shared
-        budget and conflict graph constraints
+      - oracle = LP (instead of linear_sum_assignment) over feasible joint
+        actions to handle the shared budget and conflict graph constraints
       - update receives per-campaign utilities and costs (semi-bandit feedback
         analogous to NB09 cell 30's per-edge reward)
 
     The LP oracle extends the single-campaign UCBLikeAgent LP (NB07 cell 40)
     to multiple campaigns:
 
-        max  sum_{i,k} x_{ik} * UCB_f(i,k)
-        s.t. sum_{i,k} x_{ik} * LCB_c(i,k) <= rho      [shared budget]
-             sum_k x_{ik} <= 1  for all i               [one bid/campaign]
-             sum_k x_{ik} + sum_k x_{jk} <= 1  (i,j)∈E  [conflict]
-             0 <= x_{ik} <= 1
+        max  sum_a p_a * UCB_f(a)
+        s.t. sum_a p_a * LCB_c(a) <= rho      [shared budget]
+             sum_a p_a = 1                    [distribution over actions]
+             p_a >= 0
+
+    Every joint action a is built so that it contains at most one bid per
+    campaign and never contains both endpoints of a conflict edge.  This makes
+    incompatibility constraints hold in every realised round, not only in
+    expectation through marginal probabilities.
 
     Parameters
     ----------
@@ -234,6 +238,7 @@ class CombinatorialUCBAgent:
         self.avg_c   = [np.zeros(Ks[i]) for i in range(N)]
         self.N_pulls = [np.zeros(Ks[i]) for i in range(N)]
 
+        self.joint_actions = self._build_joint_actions()
         self.A_t = None     # list of bid indices, one per campaign
         self.t = 0
 
@@ -244,7 +249,7 @@ class CombinatorialUCBAgent:
 
     def pull_arm(self):
         """
-        Compute UCB/LCB matrices, run LP oracle, sample one bid per campaign.
+        Compute UCB/LCB matrices, run LP oracle, sample one joint action.
 
         Mirrors NB09 cell 30's pull_arm:
           - unexplored arms get large_value = (1 + sqrt(2*log(T)/1))*10
@@ -278,90 +283,94 @@ class CombinatorialUCBAgent:
             f_ucb_list.append(f_ucb_i)
             c_lcb_list.append(c_lcb_i)
 
-        x = self._solve_lp(f_ucb_list, c_lcb_list)  # shape matches Ks
-
-        # Sample one bid per campaign from marginals (NB07 cell 40 pattern)
-        self.A_t = []
-        for i in range(self.N):
-            row  = x[i]
-            total = row.sum()
-            if total < 1e-9:
-                self.A_t.append(-1)      # abstain
-            else:
-                # probability of abstaining = 1 - total
-                probs = np.append(row, max(0.0, 1.0 - total))
-                probs /= probs.sum()
-                choice = int(np.random.choice(self.Ks[i] + 1, p=probs))
-                self.A_t.append(choice if choice < self.Ks[i] else -1)
+        gamma_t = self._solve_lp(f_ucb_list, c_lcb_list)
+        action_idx = int(np.random.choice(len(self.joint_actions), p=gamma_t))
+        self.A_t = list(self.joint_actions[action_idx])
 
         return self.A_t
 
+    def _build_joint_actions(self):
+        """Enumerate all round-feasible bid vectors, including abstentions."""
+        actions = []
+        current = [-1] * self.N
+        active = set()
+        edge_set = {tuple(sorted(edge)) for edge in self.conflict_edges}
+
+        def compatible(campaign):
+            return all(tuple(sorted((campaign, other))) not in edge_set
+                       for other in active)
+
+        def backtrack(i):
+            if i == self.N:
+                actions.append(tuple(current))
+                return
+
+            current[i] = -1
+            backtrack(i + 1)
+
+            if compatible(i):
+                active.add(i)
+                for k in range(self.Ks[i]):
+                    current[i] = k
+                    backtrack(i + 1)
+                active.remove(i)
+                current[i] = -1
+
+        backtrack(0)
+        return actions
+
+    def _action_scores(self, f_ucb_list, c_lcb_list):
+        utilities = np.zeros(len(self.joint_actions))
+        costs = np.zeros(len(self.joint_actions))
+        for idx, action in enumerate(self.joint_actions):
+            for i, k in enumerate(action):
+                if k >= 0:
+                    utilities[idx] += f_ucb_list[i][k]
+                    costs[idx] += c_lcb_list[i][k]
+        return utilities, costs
+
+    def _greedy_feasible_distribution(self, f_ucb_list):
+        utilities, _ = self._action_scores(
+            f_ucb_list,
+            [np.zeros(self.Ks[i]) for i in range(self.N)],
+        )
+        gamma = np.zeros(len(self.joint_actions))
+        gamma[int(np.argmax(utilities))] = 1.0
+        return gamma
+
     def _solve_lp(self, f_ucb_list, c_lcb_list):
         """
-        Joint LP oracle.  Extends NB07 cell 40's compute_opt to N campaigns.
-        Fallback to per-campaign greedy if any c_lcb <= 0 (NB07 cell 40).
+        Joint LP oracle. Extends NB07 cell 40's compute_opt to a distribution
+        over round-feasible joint actions.
 
-        Returns list of np.ndarray, one probability vector per campaign.
+        Returns one probability vector over self.joint_actions.
         """
-        # NB07 cell 40 fallback: if any LCB <= 0 in any campaign, go greedy
+        # NB07 cell 40 fallback, adapted to choose one feasible joint action.
         any_non_positive = any(
             np.sum(c_lcb_list[i] <= 0) > 0 for i in range(self.N)
         )
         if any_non_positive:
-            x = []
-            for i in range(self.N):
-                g = np.zeros(self.Ks[i])
-                g[int(np.argmax(f_ucb_list[i]))] = 1.0
-                x.append(g)
-            return x
+            return self._greedy_feasible_distribution(f_ucb_list)
 
-        # Build flat variable vector: [x_{0,0},...,x_{0,K0-1}, x_{1,0},...]
-        offsets = [0] + list(np.cumsum(self.Ks))
-        NK = offsets[-1]
-
-        f_flat = np.concatenate(f_ucb_list)
-        c_flat = np.concatenate(c_lcb_list)
-
-        A_ub_rows, b_ub_rows = [], []
-
-        # Shared budget (NB07 cell 40: A_ub = [c_lcbs], b_ub = [rho])
-        A_ub_rows.append(c_flat)
-        b_ub_rows.append(self.rho)
-
-        # One bid per campaign: sum_k x_{ik} <= 1
-        for i in range(self.N):
-            row = np.zeros(NK)
-            row[offsets[i]:offsets[i+1]] = 1.0
-            A_ub_rows.append(row)
-            b_ub_rows.append(1.0)
-
-        # Conflict graph: sum_k x_{ik} + sum_k x_{jk} <= 1
-        for (ei, ej) in self.conflict_edges:
-            row = np.zeros(NK)
-            row[offsets[ei]:offsets[ei+1]] = 1.0
-            row[offsets[ej]:offsets[ej+1]] = 1.0
-            A_ub_rows.append(row)
-            b_ub_rows.append(1.0)
+        f_actions, c_actions = self._action_scores(f_ucb_list, c_lcb_list)
 
         res = optimize.linprog(
-            -f_flat,
-            A_ub=np.array(A_ub_rows),
-            b_ub=np.array(b_ub_rows),
-            bounds=[(0.0, 1.0)] * NK,
+            -f_actions,
+            A_ub=np.array([c_actions]),
+            b_ub=np.array([self.rho]),
+            A_eq=np.array([np.ones(len(self.joint_actions))]),
+            b_eq=np.array([1.0]),
+            bounds=[(0.0, 1.0)] * len(self.joint_actions),
             method="highs",
         )
 
         if not res.success:
-            logger.warning("Joint LP failed (%s), using greedy fallback.", res.message)
-            x = []
-            for i in range(self.N):
-                g = np.zeros(self.Ks[i])
-                g[int(np.argmax(f_ucb_list[i]))] = 1.0
-                x.append(g)
-            return x
+            logger.warning("Joint LP failed (%s), using feasible greedy fallback.", res.message)
+            return self._greedy_feasible_distribution(f_ucb_list)
 
-        flat_x = np.clip(res.x, 0, 1)
-        return [flat_x[offsets[i]:offsets[i+1]] for i in range(self.N)]
+        gamma = np.clip(res.x, 0, 1)
+        gamma /= gamma.sum()
+        return gamma
 
     def update(self, utilities, costs):
         """
