@@ -35,8 +35,8 @@ from pathlib import Path
 
 import numpy as np
 
-from utils.environments import NonStationaryMultiCampaignEnv
-from utils.experiments  import compute_clairvoyant_dynamic_multi, DATA_DIR
+from environments import AdversarialMultiCampaignEnv
+from experiments  import compute_clairvoyant_dynamic_multi, DATA_DIR
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(message)s")
 logger = logging.getLogger(__name__)
@@ -46,7 +46,7 @@ logger = logging.getLogger(__name__)
 # Configuration -- mirror run_req3.py here so the cache is consistent
 # ---------------------------------------------------------------------------
 
-T               = 10_000
+T               = 20_000
 VALUES          = [0.8, 0.6, 0.9, 0.7]
 BUDGET          = 1_600.0
 N_COMPETITORS   = [3, 3, 3, 3]
@@ -80,7 +80,7 @@ def make_cache_key(T, values, budget, conflict_edges, available_bids,
 # ---------------------------------------------------------------------------
 
 def main():
-    env_class = NonStationaryMultiCampaignEnv
+    env_class = AdversarialMultiCampaignEnv
     key = make_cache_key(
         T=T, values=VALUES, budget=BUDGET, conflict_edges=CONFLICT_EDGES,
         available_bids=AVAILABLE_BIDS, n_competitors=N_COMPETITORS,
@@ -111,7 +111,6 @@ def main():
         env = env_class(
             values=VALUES, budget=BUDGET, T=T,
             available_bids=AVAILABLE_BIDS,
-            n_competitors=N_COMPETITORS,
             conflict_edges=CONFLICT_EDGES,
             seed=seed,
         )

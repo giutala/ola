@@ -207,7 +207,7 @@ def run_req3():
     ax.legend()
     ax.grid(True, linestyle="--", alpha=0.4)
     plt.tight_layout()
-    path = OUTPUTS_DIR / "req3_regret_annotated.png"
+    path = OUTPUTS_DIR / "r3" / "req3_regret_annotated.png"
     plt.savefig(path, dpi=150)
     logger.info("Saved annotated plot to %s", path)
     plt.show()
