@@ -145,9 +145,8 @@ class MultiCampaignEnv:
 
     Conflict graph
     --------------
-    Two campaigns connected by an edge cannot both be displayed in the same
-    round (project spec p.7).  When the learner wins both i and j (an edge),
-    only the higher-utility win is kept; the other is treated as a loss.
+    Two campaigns connected by an edge cannot both be bid on in the same round
+    (project spec p.7). Invalid bid vectors are rejected.
 
     Parameters
     ----------
@@ -224,17 +223,15 @@ class MultiCampaignEnv:
             for i in range(self.N)
         ])
 
-        won = (bids >= m_t) & (bids >= 0)
-
-        # Conflict graph: keep only higher-utility winner per edge
+        active = bids >= 0
         for (ei, ej) in self.conflict_edges:
-            if won[ei] and won[ej]:
-                u_i = self.values[ei] - bids[ei]
-                u_j = self.values[ej] - bids[ej]
-                if u_i >= u_j:
-                    won[ej] = False
-                else:
-                    won[ei] = False
+            if active[ei] and active[ej]:
+                raise ValueError(
+                    f"Campaigns {ei} and {ej} are incompatible and cannot "
+                    "both receive bids in the same round."
+                )
+
+        won = (bids >= m_t) & active
 
         f_t = np.where(won, self.values - bids, 0.0)
         c_t = np.where(won, bids, 0.0)

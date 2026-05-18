@@ -71,7 +71,8 @@ def compute_clairvoyant_multi(
     values, bid_sets, rho, win_prob_list, conflict_edges=None
 ):
     """
-    Multi-campaign clairvoyant LP.  Extends NB07 cell 26 to N campaigns.
+    Multi-campaign clairvoyant LP. Extends NB07 cell 26 to a distribution over
+    feasible joint bid vectors.
 
     Parameters
     ----------
@@ -83,45 +84,61 @@ def compute_clairvoyant_multi(
 
     Returns
     -------
-    x_list       : list[np.ndarray]  optimal distribution per campaign
+    x_list       : list[np.ndarray]  marginal distribution per campaign
     opt_utility  : float             expected per-round total utility
     """
     N = len(values)
-    offsets = [0] + list(np.cumsum([len(bs) for bs in bid_sets]))
-    NK = offsets[-1]
+    edge_set = {tuple(sorted(edge)) for edge in conflict_edges or []}
+    actions = []
+    current = [-1] * N
+    active = set()
 
-    f_flat = np.concatenate(
-        [(values[i] - bid_sets[i]) * win_prob_list[i] for i in range(N)]
-    )
-    c_flat = np.concatenate([bid_sets[i] * win_prob_list[i] for i in range(N)])
+    def compatible(campaign):
+        return all(tuple(sorted((campaign, other))) not in edge_set
+                   for other in active)
 
-    A_ub_rows, b_ub_rows = [], []
-    A_ub_rows.append(c_flat)
-    b_ub_rows.append(rho)
+    def backtrack(i):
+        if i == N:
+            actions.append(tuple(current))
+            return
 
-    for i in range(N):
-        row = np.zeros(NK)
-        row[offsets[i] : offsets[i + 1]] = 1.0
-        A_ub_rows.append(row)
-        b_ub_rows.append(1.0)
+        current[i] = -1
+        backtrack(i + 1)
 
-    for ei, ej in conflict_edges or []:
-        row = np.zeros(NK)
-        row[offsets[ei] : offsets[ei + 1]] = 1.0
-        row[offsets[ej] : offsets[ej + 1]] = 1.0
-        A_ub_rows.append(row)
-        b_ub_rows.append(1.0)
+        if compatible(i):
+            active.add(i)
+            for k in range(len(bid_sets[i])):
+                current[i] = k
+                backtrack(i + 1)
+            active.remove(i)
+            current[i] = -1
+
+    backtrack(0)
+
+    f_actions = np.zeros(len(actions))
+    c_actions = np.zeros(len(actions))
+    for idx, action in enumerate(actions):
+        for i, k in enumerate(action):
+            if k >= 0:
+                f_actions[idx] += (values[i] - bid_sets[i][k]) * win_prob_list[i][k]
+                c_actions[idx] += bid_sets[i][k] * win_prob_list[i][k]
 
     res = optimize.linprog(
-        -f_flat,
-        A_ub=np.array(A_ub_rows),
-        b_ub=np.array(b_ub_rows),
-        bounds=[(0.0, 1.0)] * NK,
+        -f_actions,
+        A_ub=np.array([c_actions]),
+        b_ub=np.array([rho]),
+        A_eq=np.array([np.ones(len(actions))]),
+        b_eq=np.array([1.0]),
+        bounds=[(0.0, 1.0)] * len(actions),
         method="highs",
     )
     opt_utility = -res.fun if res.success else 0.0
-    flat_x = np.clip(res.x, 0, 1) if res.success else np.zeros(NK)
-    x_list = [flat_x[offsets[i] : offsets[i + 1]] for i in range(N)]
+    gamma = np.clip(res.x, 0, 1) if res.success else np.zeros(len(actions))
+    x_list = [np.zeros(len(bid_sets[i])) for i in range(N)]
+    for idx, action in enumerate(actions):
+        for i, k in enumerate(action):
+            if k >= 0:
+                x_list[i][k] += gamma[idx]
     return x_list, float(opt_utility)
 
 
