@@ -341,7 +341,7 @@ class AdversarialMultiCampaignEnv:
 
     def __init__(self, values, budget, T, available_bids,
                  conflict_edges=None, seed=None,
-                 mode="drift",
+                 mode="shocks",
                  drift_cycles=10.0,
                  drift_amplitude=0.35,
                  base_mean=0.5,
