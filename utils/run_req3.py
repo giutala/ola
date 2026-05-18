@@ -31,9 +31,9 @@ import logging
 import numpy as np
 import matplotlib.pyplot as plt
 
-from agents import PrimalDualMultiCampaignAgent
-from environments import MultiCampaignEnv, AdversarialMultiCampaignEnv
-from experiments import (
+from utils.agents import PrimalDualMultiCampaignAgent
+from utils.environments import MultiCampaignEnv, AdversarialMultiCampaignEnv
+from utils.experiments import (
     compute_clairvoyant_multi,
     load_clairvoyant_cache,
     plot_budget,
@@ -48,16 +48,23 @@ logger = logging.getLogger(__name__)
 # ── Parameters ──────────────────────────────────────────────────────────────
 VALUES         = [0.8, 0.6, 0.9, 0.7]
 T              = 10_000
-BUDGET         = 1_600.0                # rho = 0.16, matches R1/R2
+BUDGET         = 1_600.0               
 N_TRIALS       = 20
 N_COMPETITORS  = [3, 3, 3, 3]
 CONFLICT_EDGES = [(0, 1), (2, 3)]
 AVAILABLE_BIDS = np.linspace(0, 1, 11)
 
+# Non-stationarity pattern of the adversarial environment.
+#   'drift'  : m_t ~ Beta with sinusoidal mean — changes every round
+#   'shocks' : piecewise-stationary, distribution changes per block
+# Switch this single constant to compare the two regimes.
+ENV_MODE = "drift"
+
 # Cache key (12-char hex) produced by precompute_clairvoyant.py.
 # Set to None to skip the cache; the runner will fall back to live LPs
 # (slow but correct).  See precompute_clairvoyant.py logs for the value.
 CLAIRVOYANT_CACHE_KEY = None
+
 
 
 def run_req3():
@@ -66,8 +73,8 @@ def run_req3():
     logger.info("Requirement 3 – Best-of-both-worlds bidding")
     logger.info("=" * 60)
     logger.info(
-        "Parameters | N=%d T=%d B=%.1f rho=%.4f conflict_edges=%s",
-        len(VALUES), T, BUDGET, BUDGET / T, CONFLICT_EDGES,
+        "Parameters | N=%d T=%d B=%.1f rho=%.4f env_mode=%s conflict_edges=%s",
+        len(VALUES), T, BUDGET, BUDGET / T, ENV_MODE, CONFLICT_EDGES
     )
 
     # ── Factories shared across the two experiments ───────────────────────
@@ -129,8 +136,8 @@ def run_req3():
     def env_factory_adv(seed):
         return AdversarialMultiCampaignEnv(
             values=VALUES, budget=BUDGET, T=T,
-            available_bids=AVAILABLE_BIDS, n_competitors=N_COMPETITORS,
-            conflict_edges=CONFLICT_EDGES, seed=seed,
+            available_bids=AVAILABLE_BIDS,
+            conflict_edges=CONFLICT_EDGES, seed=seed, mode=ENV_MODE,
         )
 
     # Try to use the cache produced by precompute_clairvoyant.py.
@@ -167,18 +174,18 @@ def run_req3():
     plot_regret(
         results=results,
         title="Req 3 – Cumulative Pseudo-Regret: Best-of-both-worlds",
-        filename="req3_regret.png",
+        filename="r3/req3_regret.png",
         add_reference=True,
     )
     plot_budget(
         results=results, budget=BUDGET,
         title="Req 3 – Cumulative Cost",
-        filename="req3_budget.png",
+        filename="r3/req3_budget.png",
     )
     plot_lambda(
         results=results,
         title="Req 3 – Lagrange multiplier $\\lambda_t$",
-        filename="req3_lambda.png",
+        filename="r3/req3_lambda.png",
     )
 
     # ─────────────────────────────────────────────────────────────────────

@@ -561,34 +561,50 @@ class PrimalDualMultiCampaignAgent:
 
     def pull_arm(self) -> list:
         """
-        Get distributions from each Hedge, sample one bid per campaign.
-
-        Returns
-        -------
-        A_t : list[int]  length N  (-1 = abstain if budget depleted)
+        Get distributions from each Hedge, sample one bid per campaign,
+        and proactively resolve conflicts before sending to the environment.
         """
-        # NB08 cell 17: budget stop -> abstain
+        # 1. Budget depletion check
         if self.budget < 1:
             self.A_t = [-1] * self.N
             self.x_t = []
             for i in range(self.N):
                 xi = np.zeros(self.Ks[i])
-                xi[0] = 1.0          # point mass on lowest (safe) bid
+                xi[0] = 1.0
                 self.x_t.append(xi)
             return self.A_t
 
-        # Get current distributions from each Hedge
+        # 2. Ottieni le distribuzioni e campiona in modo indipendente
         self.x_t = [self.hedge_agents[i].get_distribution() for i in range(self.N)]
-
-        # Sample one bid per campaign
         self.A_t = []
         for i in range(self.N):
             k = int(np.random.choice(self.Ks[i], p=self.x_t[i]))
             self.A_t.append(k)
-            self.N_pulls[i][k] += 1
+            
+        # 3. RISOLUZIONE PROATTIVA DEI CONFLITTI LATO AGENTE
+        # Se l'agente ha pescato azioni in conflitto, annulla quella con utilità minore
+        active = np.array(self.A_t) >= 0
+        for (ei, ej) in self.conflict_edges:
+            if active[ei] and active[ej]:
+                # Calcoliamo l'utilità potenziale massima (v - b)
+                u_i = self.values[ei] - self.bid_sets[ei][self.A_t[ei]]
+                u_j = self.values[ej] - self.bid_sets[ej][self.A_t[ej]]
+                
+                # Chi ha utilità minore si astiene (impostato a -1)
+                if u_i >= u_j:
+                    self.A_t[ej] = -1
+                    active[ej] = False
+                else:
+                    self.A_t[ei] = -1
+                    active[ei] = False
+
+        # 4. Aggiorna i contatori (N_pulls) SOLO per le azioni sopravvissute ai conflitti
+        for i in range(self.N):
+            if self.A_t[i] >= 0:
+                self.N_pulls[i][self.A_t[i]] += 1
 
         return self.A_t
-
+    
     # --- Update ------------------------------------------------------------
 
     def update(
