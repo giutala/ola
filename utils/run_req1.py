@@ -139,6 +139,7 @@ def _plot_comparison(res_gen, res_tight, filename):
     plt.suptitle("Req 1 — Regret: Generous vs Tight Budget", fontsize=12)
     plt.tight_layout()
     path = OUTPUTS_DIR / filename
+    path.parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(path, dpi=150)
     logger.info("Saved comparison plot to %s", path)
     plt.show()
@@ -168,6 +169,7 @@ def _plot_cost_comparison(res_gen, res_tight, filename):
     plt.suptitle("Req 1 — Cumulative Cost: Generous vs Tight Budget", fontsize=12)
     plt.tight_layout()
     path = OUTPUTS_DIR / filename
+    path.parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(path, dpi=150)
     logger.info("Saved cost comparison to %s", path)
     plt.show()
@@ -222,30 +224,30 @@ def run_req1():
     _plot_comparison(
         res_gen=(r_ucb1_gen, r_ucbl_gen),
         res_tight=(r_ucb1_tight, r_ucbl_tight),
-        filename="req1_regret_comparison.png",
+        filename="req1/regret_comparison.png",
     )
     _plot_cost_comparison(
         res_gen=(r_ucb1_gen, r_ucbl_gen),
         res_tight=(r_ucb1_tight, r_ucbl_tight),
-        filename="req1_budget_comparison.png",
+        filename="req1/budget_comparison.png",
     )
     plot_competing_bid_distribution(
         env=env_gen,
         title="Req 1 — Distribution of the Highest Competing Bid",
-        filename="req1_highest_competing_bid_distribution.png",
+        filename="req1/highest_competing_bid_distribution.png",
     )
 
     # ── Individual plots (generous scenario, for the report) ──────────────
     plot_regret(
         results={"UCB1 (no budget)": r_ucb1_gen, "UCB-like (budget)": r_ucbl_gen},
         title=r"Req 1 — Regret: Generous budget ($\rho=0.16$)",
-        filename="req1_regret_generous.png",
+        filename="req1/regret_generous.png",
         add_reference=False,
     )
     plot_regret(
         results={"UCB1 (no budget)": r_ucb1_tight, "UCB-like (budget)": r_ucbl_tight},
         title=r"Req 1 — Regret: Tight budget ($\rho=0.04$)",
-        filename="req1_regret_tight.png",
+        filename="req1/regret_tight.png",
         add_reference=False,
     )
 
@@ -258,29 +260,29 @@ def run_req1():
         results=r_ucb1_gen,
         upper_bound=ucb1_bound,
         title=r"Req 1 — UCB1 bound check, non-binding budget ($\rho=0.16$)",
-        filename="req1_ucb1_true_upper_bound.png",
+        filename="req1/ucb1_true_upper_bound.png",
     )
     plot_ucb1_bound_ratio(
         results=r_ucb1_gen,
         upper_bound=ucb1_bound,
         title=r"Req 1 — UCB1 regret / true upper bound ($\rho=0.16$)",
-        filename="req1_ucb1_bound_ratio.png",
+        filename="req1/ucb1_bound_ratio.png",
     )
     plot_average_regret(
         results={"UCB1 (no budget)": r_ucb1_gen, "UCB-like (budget)": r_ucbl_gen},
         title=r"Req 1 — Average regret: non-binding budget ($\rho=0.16$)",
-        filename="req1_average_regret_generous.png",
+        filename="req1/average_regret_generous.png",
     )
     plot_average_regret(
         results={"UCB1 (no budget)": r_ucb1_tight, "UCB-like (budget)": r_ucbl_tight},
         title=r"Req 1 — Average regret: tight budget ($\rho=0.04$)",
-        filename="req1_average_regret_tight.png",
+        filename="req1/average_regret_tight.png",
     )
     plot_budget(
         results={"UCB1 (no budget)": r_ucb1_tight, "UCB-like (budget)": r_ucbl_tight},
         budget=BUDGET_TIGHT,
         title=r"Req 1 — Cost: Tight budget ($\rho=0.04$)",
-        filename="req1_budget_tight.png",
+        filename="req1/budget_tight.png",
     )
 
     # ── Chosen bids diagnostic (generous scenario) ────────────────────────
@@ -297,7 +299,7 @@ def run_req1():
         agent=diag_agent,
         available_bids=diag_env.available_bids,
         title="Req 1 — UCB-like: Chosen Bids (generous budget)",
-        filename="req1_chosen_bids.png",
+        filename="req1/chosen_bids.png",
     )
 
     logger.info("Requirement 1 complete.")

@@ -107,29 +107,29 @@ def run_req2():
     plot_regret(
         results={"Combinatorial UCB": results},
         title="Req 2 – Cumulative Pseudo-Regret: Multiple Campaigns",
-        filename="req2_regret.png",
+        filename="req2/regret.png",
         add_reference=False,
     )
     plot_budget(
         results={"Combinatorial UCB": results},
         budget=BUDGET,
         title="Req 2 – Cumulative Cost: Multiple Campaigns",
-        filename="req2_budget.png",
+        filename="req2/budget.png",
     )
     plot_average_regret(
         results={"Combinatorial UCB": results},
         title="Req 2 – Average Pseudo-Regret: Multiple Campaigns",
-        filename="req2_average_regret.png",
+        filename="req2/average_regret.png",
     )
     plot_multi_competing_bid_distributions(
         env=env,
         title="Req 2 – Highest Competing Bid Distributions",
-        filename="req2_highest_competing_bid_distributions.png",
+        filename="req2/highest_competing_bid_distributions.png",
     )
     plot_pairwise_joint_bid_distributions(
         env=env,
         title="Req 2 – Pairwise Joint Distributions of Highest Competing Bids",
-        filename="req2_pairwise_joint_bid_distributions.png",
+        filename="req2/pairwise_joint_bid_distributions.png",
     )
 
     # ── Annotated regret: mark exploration/exploitation transition ─────────
@@ -177,7 +177,8 @@ def run_req2():
     ax.legend()
     ax.grid(True, linestyle="--", alpha=0.4)
     plt.tight_layout()
-    path = OUTPUTS_DIR / "req2_regret_annotated.png"
+    path = OUTPUTS_DIR / "req2/regret_annotated.png"
+    path.parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(path, dpi=150)
     logger.info("Saved annotated plot to %s", path)
     plt.show()

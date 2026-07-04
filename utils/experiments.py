@@ -334,6 +334,7 @@ def plot_regret(
     ax.grid(True, linestyle="--", alpha=0.4)
     plt.tight_layout()
     path = OUTPUTS_DIR / filename
+    path.parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(path, dpi=150)
     logger.info("Saved plot to %s", path)
     plt.show()
@@ -358,6 +359,7 @@ def plot_ucb1_bound_check(results, upper_bound, title, filename):
     ax.grid(True, linestyle="--", alpha=0.4)
     plt.tight_layout()
     path = OUTPUTS_DIR / filename
+    path.parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(path, dpi=150)
     logger.info("Saved UCB1 bound check to %s", path)
     plt.show()
@@ -380,6 +382,7 @@ def plot_ucb1_bound_ratio(results, upper_bound, title, filename):
     ax.grid(True, linestyle="--", alpha=0.4)
     plt.tight_layout()
     path = OUTPUTS_DIR / filename
+    path.parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(path, dpi=150)
     logger.info("Saved UCB1 bound ratio to %s", path)
     plt.show()
@@ -405,6 +408,7 @@ def plot_average_regret(results, title, filename):
     ax.grid(True, linestyle="--", alpha=0.4)
     plt.tight_layout()
     path = OUTPUTS_DIR / filename
+    path.parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(path, dpi=150)
     logger.info("Saved average regret plot to %s", path)
     plt.show()
@@ -450,6 +454,7 @@ def plot_competing_bid_distribution(env, title, filename):
     plt.suptitle(title, fontsize=12)
     plt.tight_layout()
     path = OUTPUTS_DIR / filename
+    path.parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(path, dpi=150)
     logger.info("Saved competing bid distribution plot to %s", path)
     plt.show()
@@ -492,6 +497,7 @@ def plot_multi_competing_bid_distributions(env, title, filename):
     plt.suptitle(title, fontsize=12)
     plt.tight_layout()
     path = OUTPUTS_DIR / filename
+    path.parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(path, dpi=150)
     logger.info("Saved multi-campaign bid distribution plot to %s", path)
     plt.show()
@@ -533,6 +539,7 @@ def plot_pairwise_joint_bid_distributions(env, title, filename):
     plt.suptitle(title, fontsize=12)
     plt.tight_layout()
     path = OUTPUTS_DIR / filename
+    path.parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(path, dpi=150)
     logger.info("Saved pairwise joint bid distribution plot to %s", path)
     plt.show()
@@ -557,6 +564,7 @@ def plot_budget(results, budget, title="Cumulative Cost", filename="budget.png")
     ax.grid(True, linestyle="--", alpha=0.4)
     plt.tight_layout()
     path = OUTPUTS_DIR / filename
+    path.parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(path, dpi=150)
     logger.info("Saved plot to %s", path)
     plt.show()
@@ -574,6 +582,7 @@ def plot_chosen_bids(agent, available_bids, title="Chosen Bids", filename="bids.
     ax.set_title(title)
     plt.tight_layout()
     path = OUTPUTS_DIR / filename
+    path.parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(path, dpi=150)
     logger.info("Saved plot to %s", path)
     plt.show()

@@ -16,9 +16,12 @@ uv sync          # installs all deps + creates venv
 
 ```
 ola/
-├── notebooks/
+├── deliverables/
 │   ├── req1_single_campaign.ipynb   ← Requirement 1
 │   └── req2_multi_campaign.ipynb    ← Requirement 2
+├── docs/
+│   ├── reports/                     ← generated PDF reports
+│   └── req1_req2_corrections.tex
 ├── utils/
 │   ├── environments.py              ← SingleCampaignEnv, MultiCampaignEnv
 │   ├── agents.py                    ← UCB1BiddingAgent, UCBLikeBiddingAgent, CombinatorialUCBAgent
@@ -26,7 +29,9 @@ ola/
 │   ├── run_req1.py                  ← full R1 pipeline (called from notebook)
 │   └── run_req2.py                  ← full R2 pipeline (called from notebook)
 ├── data/picklefiles/                ← saved results
-├── outputs/                         ← saved plots
+├── outputs/
+│   ├── req1/                        ← Requirement 1 plots
+│   └── req2/                        ← Requirement 2 plots
 ├── pyproject.toml
 └── README.md
 ```
@@ -60,4 +65,5 @@ from utils.run_req2 import run_req2
 run_req2()
 ```
 
-Plots are saved to `outputs/`, results pickled to `data/picklefiles/`.
+Plots are saved by requirement in `outputs/req1/` and `outputs/req2/`.
+PDF reports live in `docs/reports/`. Results are pickled to `data/picklefiles/`.
