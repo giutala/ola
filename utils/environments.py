@@ -214,6 +214,16 @@ class MultiCampaignEnv:
         """
         if self.t >= self.T:
             raise RuntimeError(f"Episode finished after T={self.T} rounds.")
+        if len(bid_indices) != self.N:
+            raise ValueError(
+                f"Expected {self.N} bid indices, got {len(bid_indices)}."
+            )
+        for i, k in enumerate(bid_indices):
+            if k < -1 or k >= self.Ks[i]:
+                raise ValueError(
+                    f"Invalid bid index {k} for campaign {i}; expected -1 "
+                    f"or an index in [0, {self.Ks[i] - 1}]."
+                )
 
         m_t = self.m[:, self.t]
 

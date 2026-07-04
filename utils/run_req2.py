@@ -21,7 +21,10 @@ from utils.agents import CombinatorialUCBAgent
 from utils.environments import MultiCampaignEnv
 from utils.experiments import (
     compute_clairvoyant_multi,
+    plot_average_regret,
     plot_budget,
+    plot_multi_competing_bid_distributions,
+    plot_pairwise_joint_bid_distributions,
     plot_regret,
     run_multi_campaign_trials,
     OUTPUTS_DIR,
@@ -105,13 +108,28 @@ def run_req2():
         results={"Combinatorial UCB": results},
         title="Req 2 – Cumulative Pseudo-Regret: Multiple Campaigns",
         filename="req2_regret.png",
-        add_reference=True,
+        add_reference=False,
     )
     plot_budget(
         results={"Combinatorial UCB": results},
         budget=BUDGET,
         title="Req 2 – Cumulative Cost: Multiple Campaigns",
         filename="req2_budget.png",
+    )
+    plot_average_regret(
+        results={"Combinatorial UCB": results},
+        title="Req 2 – Average Pseudo-Regret: Multiple Campaigns",
+        filename="req2_average_regret.png",
+    )
+    plot_multi_competing_bid_distributions(
+        env=env,
+        title="Req 2 – Highest Competing Bid Distributions",
+        filename="req2_highest_competing_bid_distributions.png",
+    )
+    plot_pairwise_joint_bid_distributions(
+        env=env,
+        title="Req 2 – Pairwise Joint Distributions of Highest Competing Bids",
+        filename="req2_pairwise_joint_bid_distributions.png",
     )
 
     # ── Annotated regret: mark exploration/exploitation transition ─────────
@@ -140,10 +158,6 @@ def run_req2():
         color="C0",
         label="±stderr",
     )
-
-    ref = np.sqrt(ts * np.log(ts))
-    ref = ref * (mean_regret[-1] / ref[-1])
-    ax.plot(ts, ref, "k--", linewidth=1.2, label=r"$O(\sqrt{T\log T})$")
 
     # Annotate the transition
     ax.axvline(kink_t, color="gray", linestyle=":", linewidth=1.2)

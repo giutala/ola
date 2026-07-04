@@ -67,6 +67,27 @@ def compute_clairvoyant_single(available_bids, value, rho, win_probabilities):
     return gamma, -res.fun, float(np.sum(available_bids * gamma * win_probabilities))
 
 
+def compute_ucb1_gap_upper_bound(expected_rewards, reward_range, T):
+    """
+    Gap-dependent UCB1 regret upper bound for bounded rewards in [0, reward_range].
+
+    This is a real theoretical upper bound, not a visually rescaled reference
+    curve. It is intentionally loose, as finite-time UCB1 constants usually are.
+    """
+    expected_rewards = np.asarray(expected_rewards, dtype=float)
+    best = float(np.max(expected_rewards))
+    gaps = best - expected_rewards
+    positive_gaps = gaps[gaps > 1e-12]
+    ts = np.arange(1, T + 1)
+    if len(positive_gaps) == 0:
+        return np.zeros(T)
+
+    log_ts = np.log(np.maximum(ts, 2))
+    exploration = sum((8 * reward_range**2 * log_ts) / gap for gap in positive_gaps)
+    constant = sum((1 + np.pi**2 / 3) * gap for gap in positive_gaps)
+    return exploration + constant
+
+
 def compute_clairvoyant_multi(
     values, bid_sets, rho, win_prob_list, conflict_edges=None
 ):
@@ -265,20 +286,25 @@ def run_multi_campaign_trials(
 
 
 def plot_regret(
-    results, title="Cumulative Pseudo-Regret", filename="regret.png", add_reference=True
+    results,
+    title="Cumulative Pseudo-Regret",
+    filename="regret.png",
+    add_reference=False,
+    upper_bound=None,
 ):
     """
     NB01 cell 25 pattern:
       plt.fill_between(..., mean ± std/sqrt(n_trials), alpha=0.3)
 
-    Optionally overlays an O(sqrt(T log T)) reference curve scaled to the
-    final empirical regret value of the first agent, so the shape is
-    visually comparable.
+    Optionally overlays a user-provided upper bound. The function does not
+    rescale reference curves to the empirical regret, because that would make
+    the visual guide look like a theoretical guarantee when it is not one.
 
     Parameters
     ----------
     results       : dict  {label: {mean_regret, std_regret, n_trials}}
-    add_reference : bool  whether to draw the O(sqrt(T log T)) reference line
+    add_reference : bool  whether to draw an unscaled sqrt(T log T) guide
+    upper_bound   : tuple(label, values), optional true bound to draw
     """
     fig, ax = plt.subplots(figsize=(9, 5))
     T = len(next(iter(results.values()))["mean_regret"])
@@ -294,12 +320,12 @@ def plot_regret(
         ax.fill_between(ts, mean - stderr, mean + stderr, alpha=0.3)
 
     if add_reference:
-        # O(sqrt(T log T)) reference, normalised to the final value of the
-        # first curve so the shape is comparable on the same y-scale
-        first_mean = next(iter(results.values()))["mean_regret"]
-        ref = np.sqrt(ts * np.log(ts))
-        ref = ref * (first_mean[-1] / ref[-1])
-        ax.plot(ts, ref, "k--", linewidth=1.2, label=r"$O(\sqrt{T \log T})$ reference")
+        ref = np.sqrt(ts * np.log(np.maximum(ts, 2)))
+        ax.plot(ts, ref, "k:", linewidth=1.2, label=r"Unscaled $\sqrt{t\log t}$ guide")
+
+    if upper_bound is not None:
+        bound_label, bound_values = upper_bound
+        ax.plot(ts, bound_values, "k--", linewidth=1.2, label=bound_label)
 
     ax.set_xlabel("$t$")
     ax.set_ylabel("Cumulative Pseudo-Regret")
@@ -310,6 +336,205 @@ def plot_regret(
     path = OUTPUTS_DIR / filename
     plt.savefig(path, dpi=150)
     logger.info("Saved plot to %s", path)
+    plt.show()
+    plt.close()
+
+
+def plot_ucb1_bound_check(results, upper_bound, title, filename):
+    """Plot empirical UCB1 pseudo-regret against the true gap-dependent bound."""
+    fig, ax = plt.subplots(figsize=(9, 5))
+    T = len(results["mean_regret"])
+    ts = np.arange(1, T + 1)
+    mean = results["mean_regret"]
+    stderr = results["std_regret"] / np.sqrt(results["n_trials"])
+
+    ax.plot(ts, mean, label="Empirical UCB1 pseudo-regret", color="C0")
+    ax.fill_between(ts, mean - stderr, mean + stderr, alpha=0.25, color="C0")
+    ax.plot(ts, upper_bound, "k--", linewidth=1.2, label="UCB1 gap-dependent upper bound")
+    ax.set_xlabel("$t$")
+    ax.set_ylabel("Cumulative Pseudo-Regret")
+    ax.set_title(title)
+    ax.legend()
+    ax.grid(True, linestyle="--", alpha=0.4)
+    plt.tight_layout()
+    path = OUTPUTS_DIR / filename
+    plt.savefig(path, dpi=150)
+    logger.info("Saved UCB1 bound check to %s", path)
+    plt.show()
+    plt.close()
+
+
+def plot_ucb1_bound_ratio(results, upper_bound, title, filename):
+    """Plot empirical regret divided by the upper bound; values <= 1 satisfy it."""
+    fig, ax = plt.subplots(figsize=(9, 5))
+    T = len(results["mean_regret"])
+    ts = np.arange(1, T + 1)
+    ratio = results["mean_regret"] / upper_bound
+
+    ax.plot(ts, ratio, label=r"$R_t / \mathrm{UB}_t$", color="C2")
+    ax.axhline(1.0, color="black", linestyle="--", linewidth=1.2, label="Bound threshold")
+    ax.set_xlabel("$t$")
+    ax.set_ylabel("Empirical regret / upper bound")
+    ax.set_title(title)
+    ax.legend()
+    ax.grid(True, linestyle="--", alpha=0.4)
+    plt.tight_layout()
+    path = OUTPUTS_DIR / filename
+    plt.savefig(path, dpi=150)
+    logger.info("Saved UCB1 bound ratio to %s", path)
+    plt.show()
+    plt.close()
+
+
+def plot_average_regret(results, title, filename):
+    """Plot R_t / t to make no-regret behavior visually explicit."""
+    fig, ax = plt.subplots(figsize=(9, 5))
+    T = len(next(iter(results.values()))["mean_regret"])
+    ts = np.arange(1, T + 1)
+
+    for label, res in results.items():
+        mean = res["mean_regret"] / ts
+        stderr = (res["std_regret"] / np.sqrt(res["n_trials"])) / ts
+        ax.plot(ts, mean, label=label)
+        ax.fill_between(ts, mean - stderr, mean + stderr, alpha=0.25)
+
+    ax.set_xlabel("$t$")
+    ax.set_ylabel(r"Average Pseudo-Regret $R_t/t$")
+    ax.set_title(title)
+    ax.legend()
+    ax.grid(True, linestyle="--", alpha=0.4)
+    plt.tight_layout()
+    path = OUTPUTS_DIR / filename
+    plt.savefig(path, dpi=150)
+    logger.info("Saved average regret plot to %s", path)
+    plt.show()
+    plt.close()
+
+
+def plot_competing_bid_distribution(env, title, filename):
+    """
+    Plot the empirical distribution of the highest competing bid and the
+    theoretical Beta(k, 1) model implied by max of k Uniform[0, 1] bids.
+    """
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    xs = np.linspace(0, 1, 400)
+    k = env.n_competitors
+    theoretical_cdf = xs**k
+    theoretical_pdf = k * xs ** (k - 1)
+
+    axes[0].hist(
+        env.m,
+        bins=40,
+        density=True,
+        alpha=0.45,
+        color="C0",
+        label="Empirical highest bid",
+    )
+    axes[0].plot(xs, theoretical_pdf, "k--", linewidth=1.5, label=rf"Beta({k}, 1) PDF")
+    axes[0].set_xlabel("Highest competing bid $m_t$")
+    axes[0].set_ylabel("Density")
+    axes[0].set_title("PDF")
+    axes[0].legend()
+    axes[0].grid(True, linestyle="--", alpha=0.4)
+
+    sorted_m = np.sort(env.m)
+    empirical_cdf = np.arange(1, len(sorted_m) + 1) / len(sorted_m)
+    axes[1].plot(sorted_m, empirical_cdf, color="C0", label="Empirical CDF")
+    axes[1].plot(xs, theoretical_cdf, "k--", linewidth=1.5, label=rf"Beta({k}, 1) CDF")
+    axes[1].set_xlabel("Highest competing bid $m_t$")
+    axes[1].set_ylabel("Cumulative probability")
+    axes[1].set_title("CDF")
+    axes[1].legend()
+    axes[1].grid(True, linestyle="--", alpha=0.4)
+
+    plt.suptitle(title, fontsize=12)
+    plt.tight_layout()
+    path = OUTPUTS_DIR / filename
+    plt.savefig(path, dpi=150)
+    logger.info("Saved competing bid distribution plot to %s", path)
+    plt.show()
+    plt.close()
+
+
+def plot_multi_competing_bid_distributions(env, title, filename):
+    """
+    Plot Req2's stochastic model: one highest competing bid distribution per
+    campaign plus the empirical correlation matrix of those maxima.
+    """
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    xs = np.linspace(0, 1, 400)
+
+    for i in range(env.N):
+        sorted_m = np.sort(env.m[i])
+        empirical_cdf = np.arange(1, len(sorted_m) + 1) / len(sorted_m)
+        k = env.n_competitors[i]
+        axes[0].plot(sorted_m, empirical_cdf, label=f"Campaign {i} empirical")
+        axes[0].plot(xs, xs**k, "--", linewidth=1.1, label=rf"Campaign {i} Beta({k}, 1)")
+
+    axes[0].set_xlabel("Highest competing bid $m_{i,t}$")
+    axes[0].set_ylabel("Cumulative probability")
+    axes[0].set_title("Per-campaign CDFs")
+    axes[0].legend(fontsize=7, ncol=2)
+    axes[0].grid(True, linestyle="--", alpha=0.4)
+
+    corr = np.corrcoef(env.m)
+    im = axes[1].imshow(corr, vmin=-1, vmax=1, cmap="coolwarm")
+    axes[1].set_title("Empirical correlation of highest bids")
+    axes[1].set_xlabel("Campaign")
+    axes[1].set_ylabel("Campaign")
+    axes[1].set_xticks(range(env.N))
+    axes[1].set_yticks(range(env.N))
+    for i in range(env.N):
+        for j in range(env.N):
+            axes[1].text(j, i, f"{corr[i, j]:.2f}", ha="center", va="center", fontsize=8)
+    fig.colorbar(im, ax=axes[1], fraction=0.046, pad=0.04)
+
+    plt.suptitle(title, fontsize=12)
+    plt.tight_layout()
+    path = OUTPUTS_DIR / filename
+    plt.savefig(path, dpi=150)
+    logger.info("Saved multi-campaign bid distribution plot to %s", path)
+    plt.show()
+    plt.close()
+
+
+def plot_pairwise_joint_bid_distributions(env, title, filename):
+    """
+    Plot pairwise empirical joint distributions of highest competing bids.
+
+    The full joint distribution over N campaigns is N-dimensional; for N=4 we
+    visualize all six 2-D marginals. Since campaigns are generated
+    independently, the pairwise clouds should show no structural dependence.
+    """
+    pairs = [(i, j) for i in range(env.N) for j in range(i + 1, env.N)]
+    n_cols = 3
+    n_rows = int(np.ceil(len(pairs) / n_cols))
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(14, 4 * n_rows), sharex=True, sharey=True)
+    axes = np.atleast_1d(axes).ravel()
+
+    for ax, (i, j) in zip(axes, pairs):
+        h = ax.hist2d(
+            env.m[i],
+            env.m[j],
+            bins=35,
+            range=[[0, 1], [0, 1]],
+            cmap="Blues",
+            density=True,
+        )
+        ax.set_title(f"Campaigns {i} and {j}")
+        ax.set_xlabel(r"$m_{%d,t}$" % i)
+        ax.set_ylabel(r"$m_{%d,t}$" % j)
+        ax.grid(True, linestyle="--", alpha=0.25)
+        fig.colorbar(h[3], ax=ax, fraction=0.046, pad=0.04)
+
+    for ax in axes[len(pairs):]:
+        ax.axis("off")
+
+    plt.suptitle(title, fontsize=12)
+    plt.tight_layout()
+    path = OUTPUTS_DIR / filename
+    plt.savefig(path, dpi=150)
+    logger.info("Saved pairwise joint bid distribution plot to %s", path)
     plt.show()
     plt.close()
 

@@ -4,8 +4,9 @@ run_req1.py
 Requirement 1: single campaign, stochastic environment.
 
 Runs two budget scenarios to demonstrate the budget-awareness of UCBlike:
-  - Generous budget: B=1000, rho=0.1  → constraint non-binding, both algorithms
-                                         produce identical sublinear regret.
+  - Generous budget: B=1600, rho=0.16 → constraint non-binding for the
+                                         unconstrained best bid b=0.6, whose
+                                         expected cost is 0.1296.
   - Tight budget:    B=400,  rho=0.04 → constraint binding, UCB1 overshoots,
                                          UCBlike stops at t≈4000 (linear regret
                                          but zero budget violation).
@@ -22,9 +23,14 @@ from utils.agents import UCB1BiddingAgent, UCBLikeBiddingAgent
 from utils.environments import SingleCampaignEnv
 from utils.experiments import (
     compute_clairvoyant_single,
+    compute_ucb1_gap_upper_bound,
+    plot_average_regret,
     plot_budget,
+    plot_competing_bid_distribution,
     plot_regret,
     plot_chosen_bids,
+    plot_ucb1_bound_check,
+    plot_ucb1_bound_ratio,
     run_single_campaign_trials,
     OUTPUTS_DIR,
 )
@@ -36,11 +42,22 @@ VALUE = 0.8
 T = 10_000
 N_TRIALS = 30
 N_COMPETITORS = 3
-AVAILABLE_BIDS = np.linspace(0, 1, 11)
+# Coarser grid keeps the assignment's "small discrete bid set" assumption and
+# makes the UCB gap-dependent behavior visible at T=10_000. With a 0.1 grid,
+# bids 0.5 and 0.6 have very close expected rewards, so finite-time bounds are
+# true but visually uninformative.
+AVAILABLE_BIDS = np.linspace(0, 1, 6)
 
 # Two budget scenarios
-BUDGET_GENEROUS = 1000.0  # rho = 0.10  — constraint non-binding
+BUDGET_GENEROUS = 1600.0  # rho = 0.16  — non-binding; best bid cost is 0.1296
 BUDGET_TIGHT = 400.0  # rho = 0.04  — constraint binding
+
+
+def _expected_rewards_and_costs(env):
+    win_probs = env.win_probabilities()
+    rewards = (VALUE - env.available_bids) * win_probs
+    costs = env.available_bids * win_probs
+    return rewards, costs
 
 
 def _run_scenario(budget, label_suffix, name_suffix):
@@ -84,19 +101,22 @@ def _run_scenario(budget, label_suffix, name_suffix):
         n_trials=N_TRIALS,
         name=f"req1_ucblike_{name_suffix}",
     )
-    return r_ucb1, r_ucbl, opt_utility, K, env, rho
+    expected_rewards, expected_costs = _expected_rewards_and_costs(env)
+    return r_ucb1, r_ucbl, opt_utility, K, env, rho, expected_rewards, expected_costs
 
 
 def _plot_comparison(res_gen, res_tight, filename):
     """
     Two-panel figure: generous ρ (left) vs tight ρ (right).
-    Each panel shows UCB1 and UCBlike regret with the O(√T log T) reference.
+    Each panel shows UCB1 and UCBlike regret. No theoretical upper bound is
+    drawn here because the tight-budget panel uses a constrained LP benchmark,
+    while the standard UCB1 bound applies to unconstrained stochastic MAB.
     """
     fig, axes = plt.subplots(1, 2, figsize=(14, 5), sharey=False)
     ts = np.arange(1, T + 1)
 
     panels = [
-        (axes[0], res_gen, r"Generous budget $\rho=0.1$", BUDGET_GENEROUS),
+        (axes[0], res_gen, r"Generous budget $\rho=0.16$", BUDGET_GENEROUS),
         (axes[1], res_tight, r"Tight budget $\rho=0.04$", BUDGET_TIGHT),
     ]
 
@@ -109,11 +129,6 @@ def _plot_comparison(res_gen, res_tight, filename):
             stderr = res["std_regret"] / np.sqrt(res["n_trials"])
             ax.plot(ts, mean, label=label, color=color)
             ax.fill_between(ts, mean - stderr, mean + stderr, alpha=0.25, color=color)
-
-        # Reference curve scaled to UCB1 final value
-        ref = np.sqrt(ts * np.log(ts))
-        ref = ref * (r_ucb1["mean_regret"][-1] / ref[-1])
-        ax.plot(ts, ref, "k--", linewidth=1.2, label=r"$O(\sqrt{T\log T})$")
 
         ax.set_title(title)
         ax.set_xlabel("$t$")
@@ -136,7 +151,7 @@ def _plot_cost_comparison(res_gen, res_tight, filename):
     ts = np.arange(1, T + 1)
 
     for ax, (r_ucb1, r_ucbl), title, budget in [
-        (axes[0], res_gen, r"Generous budget $\rho=0.1$", BUDGET_GENEROUS),
+        (axes[0], res_gen, r"Generous budget $\rho=0.16$", BUDGET_GENEROUS),
         (axes[1], res_tight, r"Tight budget $\rho=0.04$", BUDGET_TIGHT),
     ]:
         ax.plot(ts, r_ucb1["mean_cumcost"], label="UCB1 (no budget)", color="C0")
@@ -165,13 +180,22 @@ def run_req1():
     logger.info("Requirement 1 – Single Campaign, Stochastic Environment")
     logger.info("=" * 60)
 
-    # ── Scenario 1: generous budget (rho=0.1) ─────────────────────────────
+    # ── Scenario 1: generous budget (rho=0.16) ────────────────────────────
     logger.info(
         "--- Scenario: generous budget (B=%.0f, rho=%.2f) ---",
         BUDGET_GENEROUS,
         BUDGET_GENEROUS / T,
     )
-    r_ucb1_gen, r_ucbl_gen, opt_gen, K_gen, env_gen, rho_gen = _run_scenario(
+    (
+        r_ucb1_gen,
+        r_ucbl_gen,
+        opt_gen,
+        K_gen,
+        env_gen,
+        rho_gen,
+        rewards_gen,
+        costs_gen,
+    ) = _run_scenario(
         BUDGET_GENEROUS, "generous", "generous"
     )
 
@@ -181,7 +205,16 @@ def run_req1():
         BUDGET_TIGHT,
         BUDGET_TIGHT / T,
     )
-    r_ucb1_tight, r_ucbl_tight, opt_tight, K_tight, env_tight, rho_tight = (
+    (
+        r_ucb1_tight,
+        r_ucbl_tight,
+        opt_tight,
+        K_tight,
+        env_tight,
+        rho_tight,
+        rewards_tight,
+        costs_tight,
+    ) = (
         _run_scenario(BUDGET_TIGHT, "tight", "tight")
     )
 
@@ -196,19 +229,52 @@ def run_req1():
         res_tight=(r_ucb1_tight, r_ucbl_tight),
         filename="req1_budget_comparison.png",
     )
+    plot_competing_bid_distribution(
+        env=env_gen,
+        title="Req 1 — Distribution of the Highest Competing Bid",
+        filename="req1_highest_competing_bid_distribution.png",
+    )
 
     # ── Individual plots (generous scenario, for the report) ──────────────
     plot_regret(
         results={"UCB1 (no budget)": r_ucb1_gen, "UCB-like (budget)": r_ucbl_gen},
-        title=r"Req 1 — Regret: Generous budget ($\rho=0.1$)",
+        title=r"Req 1 — Regret: Generous budget ($\rho=0.16$)",
         filename="req1_regret_generous.png",
-        add_reference=True,
+        add_reference=False,
     )
     plot_regret(
         results={"UCB1 (no budget)": r_ucb1_tight, "UCB-like (budget)": r_ucbl_tight},
         title=r"Req 1 — Regret: Tight budget ($\rho=0.04$)",
         filename="req1_regret_tight.png",
-        add_reference=True,
+        add_reference=False,
+    )
+
+    ucb1_bound = compute_ucb1_gap_upper_bound(
+        expected_rewards=rewards_gen,
+        reward_range=VALUE,
+        T=T,
+    )
+    plot_ucb1_bound_check(
+        results=r_ucb1_gen,
+        upper_bound=ucb1_bound,
+        title=r"Req 1 — UCB1 bound check, non-binding budget ($\rho=0.16$)",
+        filename="req1_ucb1_true_upper_bound.png",
+    )
+    plot_ucb1_bound_ratio(
+        results=r_ucb1_gen,
+        upper_bound=ucb1_bound,
+        title=r"Req 1 — UCB1 regret / true upper bound ($\rho=0.16$)",
+        filename="req1_ucb1_bound_ratio.png",
+    )
+    plot_average_regret(
+        results={"UCB1 (no budget)": r_ucb1_gen, "UCB-like (budget)": r_ucbl_gen},
+        title=r"Req 1 — Average regret: non-binding budget ($\rho=0.16$)",
+        filename="req1_average_regret_generous.png",
+    )
+    plot_average_regret(
+        results={"UCB1 (no budget)": r_ucb1_tight, "UCB-like (budget)": r_ucbl_tight},
+        title=r"Req 1 — Average regret: tight budget ($\rho=0.04$)",
+        filename="req1_average_regret_tight.png",
     )
     plot_budget(
         results={"UCB1 (no budget)": r_ucb1_tight, "UCB-like (budget)": r_ucbl_tight},
