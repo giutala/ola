@@ -7,9 +7,9 @@ Runs two budget scenarios to demonstrate the budget-awareness of UCBlike:
   - Generous budget: B=1600, rho=0.16 → constraint non-binding for the
                                          unconstrained best bid b=0.6, whose
                                          expected cost is 0.1296.
-  - Tight budget:    B=400,  rho=0.04 → constraint binding, UCB1 overshoots,
-                                         UCBlike stops at t≈4000 (linear regret
-                                         but zero budget violation).
+  - Tight budget:    B=400,  rho=0.04 → constraint binding; UCB1 is
+                                         budget-unaware, while UCB-like handles
+                                         the budget through its LP constraint.
 
 Call from the notebook: run_req1()
 """

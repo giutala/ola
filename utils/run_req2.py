@@ -41,10 +41,8 @@ N_COMPETITORS = [3, 3, 3, 3]
 CONFLICT_EDGES = [(0, 1), (2, 3)]
 AVAILABLE_BIDS = np.linspace(0, 1, 11)
 
-# Exploration ends when every (i,k) pair has been pulled at least once.
-# With N=4 campaigns and K_i<=11 bids each, N*K_max = 44 rounds minimum,
-# but the greedy fallback fires until ALL LCBs > 0, which takes longer.
-# We annotate the approximate transition empirically.
+# Exploration initially favors under-sampled campaign/bid pairs through UCB
+# optimism. We annotate the approximate transition empirically.
 N_ARMS_TOTAL = 4 * 11  # upper bound; actual Ks may differ per campaign
 
 

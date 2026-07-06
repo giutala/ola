@@ -97,9 +97,11 @@ class UCBLikeBiddingAgent:
     """
     Budget-aware bidding agent for a single campaign.
 
-    Direct port of UCBLikeAgent from NB07 cell 40.  Field names, update
-    rules, LP formulation, greedy fallback, and budget-stop condition are
-    all identical to the notebook.
+    Budget-aware extension of UCB1.  The agent is optimistic on utility
+    through UCB estimates, and handles the budget through an LP over
+    distributions on bids.  Unlike the original notebook fallback, the LP is
+    always attempted: negative/over-large confidence artifacts are not allowed
+    to bypass the budget constraint.
 
     Parameters
     ----------
@@ -127,46 +129,74 @@ class UCBLikeBiddingAgent:
         )
 
     def pull_arm(self):
-        """NB07 cell 40: budget stop → init phase → LP sampling."""
-        # NB07 cell 40: if budget < 1, bid 0 (index 0)
+        """Budget stop → init phase → LP sampling.
+
+        The objective remains UCB-like on utility.  The budget constraint uses
+        the empirical expected cost, rather than a lower confidence bound that
+        can collapse to zero for many arms and make the LP effectively
+        budget-unaware in early rounds.
+        """
+        # All admissible bids are <= value <= 1 in this project, so when the
+        # remaining budget is below 1 we stop bidding safely with bid index 0.
         if self.budget < 1:
             self.a_t = 0
             return 0
-        # NB07 cell 40: pull each arm once before UCB kicks in
+
+        # Pull each arm once before UCB kicks in.
         if self.t < self.K:
             self.a_t = self.t
             return self.a_t
-        # NB07 cell 40: compute UCBs and LCBs (NO max(0,...) on LCB)
-        f_ucbs = self.avg_f + self.range * np.sqrt(2 * np.log(self.T) / self.N_pulls)
-        c_lcbs = self.avg_c - self.range * np.sqrt(2 * np.log(self.T) / self.N_pulls)
-        gamma_t = self._compute_opt(f_ucbs, c_lcbs)
+
+        # Time-dependent confidence, as allowed by the course slides.  This
+        # avoids making the early confidence radius depend on a large fixed T.
+        beta = self.range * np.sqrt(
+            2 * np.log(max(self.t, 2)) / self.N_pulls
+        )
+        f_ucbs = np.minimum(self.range, self.avg_f + beta)
+
+        # Budget-aware practical constraint: use the empirical expected cost.
+        # This avoids artificial zero costs caused by avg_c - beta < 0.
+        cost_for_constraint = np.maximum(0.0, self.avg_c)
+
+        gamma_t = self._compute_opt(f_ucbs, cost_for_constraint)
         self.a_t = int(np.random.choice(self.K, p=gamma_t))
         return self.a_t
 
-    def _compute_opt(self, f_ucbs, c_lcbs):
-        """
-        NB07 cell 40 compute_opt:
-          - if any c_lcb <= 0: go greedy on f_ucbs (no LP)
-          - otherwise: solve LP
-        """
-        # NB07 cell 40: "if np.sum(c_lcbs <= np.zeros(len(c_lcbs)))"
-        if np.sum(c_lcbs <= np.zeros(len(c_lcbs))):
-            gamma = np.zeros(self.K)
-            gamma[int(np.argmax(f_ucbs))] = 1
-            return gamma
+    def _compute_opt(self, f_ucbs, cost_for_constraint):
+        """Solve the budget-aware LP over distributions on bids.
 
-        # NB07 cell 40: LP formulation
-        c    = -f_ucbs                       # minimise negative utility
-        A_ub = [c_lcbs]                      # budget constraint
-        b_ub = [self.rho]
-        A_eq = [np.ones(self.K)]             # simplex
-        b_eq = [1]
-        res  = optimize.linprog(
-            c, A_ub=A_ub, b_ub=b_ub,
-            A_eq=A_eq, b_eq=b_eq,
-            bounds=(0, 1),
+        max_gamma sum_b gamma_b f_ucb[b]
+        s.t.      sum_b gamma_b cost[b] <= rho
+                  sum_b gamma_b = 1, gamma_b >= 0
+
+        scipy.linprog minimizes, so the objective is -f_ucbs.  If the LP fails
+        numerically, fall back to the best utility among empirically feasible
+        bids; if none is feasible, use the lowest-cost bid.
+        """
+        res = optimize.linprog(
+            -f_ucbs,
+            A_ub=np.array([cost_for_constraint]),
+            b_ub=np.array([self.rho]),
+            A_eq=np.array([np.ones(self.K)]),
+            b_eq=np.array([1.0]),
+            bounds=[(0.0, 1.0)] * self.K,
+            method="highs",
         )
-        return res.x
+
+        if res.success and res.x is not None and np.all(np.isfinite(res.x)):
+            gamma = np.clip(res.x, 0.0, 1.0)
+            if gamma.sum() > 0:
+                gamma /= gamma.sum()
+                return gamma
+
+        logger.warning("Single-campaign LP failed; using safe fallback.")
+        feasible = np.where(cost_for_constraint <= self.rho + 1e-12)[0]
+        gamma = np.zeros(self.K)
+        if len(feasible) > 0:
+            gamma[int(feasible[np.argmax(f_ucbs[feasible])])] = 1.0
+        else:
+            gamma[int(np.argmin(cost_for_constraint))] = 1.0
+        return gamma
 
     def update(self, f_t, c_t):
         """NB07 cell 40: incremental mean update for both f and c."""
@@ -205,8 +235,8 @@ class CombinatorialUCBAgent:
     to multiple campaigns:
 
         max  sum_a p_a * UCB_f(a)
-        s.t. sum_a p_a * LCB_c(a) <= rho      [shared budget]
-             sum_a p_a = 1                    [distribution over actions]
+        s.t. sum_a p_a * empirical_cost(a) <= rho  [shared budget]
+             sum_a p_a = 1                         [distribution over actions]
              p_a >= 0
 
     Every joint action a is built so that it contains at most one bid per
@@ -261,29 +291,29 @@ class CombinatorialUCBAgent:
             self.A_t = [-1] * self.N
             return self.A_t
 
-        # NB09 cell 30: large_value for unexplored arms
-        large_value = (1 + np.sqrt(2 * np.log(self.T) / 1)) * 10
-
         f_ucb_list = []
-        c_lcb_list = []
+        cost_list = []
 
         for i in range(self.N):
-            range_i = self.values[i]            # NB07 cell 43: range = value
+            range_i = self.values[i]
+            pulls = np.maximum(self.N_pulls[i], 1)
+            beta_i = range_i * np.sqrt(2 * np.log(max(self.t, 2)) / pulls)
+
+            # Unexplored pairs receive the largest admissible utility optimism
+            # for campaign i.  Explored pairs use a clipped UCB.
             f_ucb_i = np.where(
                 self.N_pulls[i] == 0,
-                large_value,
-                self.avg_f[i] + range_i * np.sqrt(2 * np.log(self.T) / np.maximum(self.N_pulls[i], 1)),
+                range_i,
+                np.minimum(range_i, self.avg_f[i] + beta_i),
             )
-            # NB07 cell 40: LCB with NO max(0,...) clipping
-            c_lcb_i = np.where(
-                self.N_pulls[i] == 0,
-                0.0,
-                self.avg_c[i] - range_i * np.sqrt(2 * np.log(self.T) / np.maximum(self.N_pulls[i], 1)),
-            )
-            f_ucb_list.append(f_ucb_i)
-            c_lcb_list.append(c_lcb_i)
 
-        gamma_t = self._solve_lp(f_ucb_list, c_lcb_list)
+            # Use empirical cost in the budget constraint.  Unexplored pairs
+            # are optimistic with cost 0, but no negative LCB can bypass the LP.
+            cost_i = np.maximum(0.0, self.avg_c[i])
+            f_ucb_list.append(f_ucb_i)
+            cost_list.append(cost_i)
+
+        gamma_t = self._solve_lp(f_ucb_list, cost_list)
         action_idx = int(np.random.choice(len(self.joint_actions), p=gamma_t))
         self.A_t = list(self.joint_actions[action_idx])
 
@@ -319,40 +349,25 @@ class CombinatorialUCBAgent:
         backtrack(0)
         return actions
 
-    def _action_scores(self, f_ucb_list, c_lcb_list):
+    def _action_scores(self, f_ucb_list, cost_list):
         utilities = np.zeros(len(self.joint_actions))
         costs = np.zeros(len(self.joint_actions))
         for idx, action in enumerate(self.joint_actions):
             for i, k in enumerate(action):
                 if k >= 0:
                     utilities[idx] += f_ucb_list[i][k]
-                    costs[idx] += c_lcb_list[i][k]
+                    costs[idx] += cost_list[i][k]
         return utilities, costs
 
-    def _greedy_feasible_distribution(self, f_ucb_list):
-        utilities, _ = self._action_scores(
-            f_ucb_list,
-            [np.zeros(self.Ks[i]) for i in range(self.N)],
-        )
-        gamma = np.zeros(len(self.joint_actions))
-        gamma[int(np.argmax(utilities))] = 1.0
-        return gamma
+    def _solve_lp(self, f_ucb_list, cost_list):
+        """Joint LP oracle over round-feasible joint actions.
 
-    def _solve_lp(self, f_ucb_list, c_lcb_list):
+        The LP is always attempted.  If it fails numerically, the fallback is
+        budget-safe with respect to the same empirical-cost vector: choose the
+        best feasible joint action, or the minimum-cost joint action if none is
+        feasible.
         """
-        Joint LP oracle. Extends NB07 cell 40's compute_opt to a distribution
-        over round-feasible joint actions.
-
-        Returns one probability vector over self.joint_actions.
-        """
-        # NB07 cell 40 fallback, adapted to choose one feasible joint action.
-        any_non_positive = any(
-            np.sum(c_lcb_list[i] <= 0) > 0 for i in range(self.N)
-        )
-        if any_non_positive:
-            return self._greedy_feasible_distribution(f_ucb_list)
-
-        f_actions, c_actions = self._action_scores(f_ucb_list, c_lcb_list)
+        f_actions, c_actions = self._action_scores(f_ucb_list, cost_list)
 
         res = optimize.linprog(
             -f_actions,
@@ -364,12 +379,20 @@ class CombinatorialUCBAgent:
             method="highs",
         )
 
-        if not res.success:
-            logger.warning("Joint LP failed (%s), using feasible greedy fallback.", res.message)
-            return self._greedy_feasible_distribution(f_ucb_list)
+        if res.success and res.x is not None and np.all(np.isfinite(res.x)):
+            gamma = np.clip(res.x, 0.0, 1.0)
+            if gamma.sum() > 0:
+                gamma /= gamma.sum()
+                return gamma
 
-        gamma = np.clip(res.x, 0, 1)
-        gamma /= gamma.sum()
+        msg = getattr(res, "message", "unknown error")
+        logger.warning("Joint LP failed (%s), using safe fallback.", msg)
+        gamma = np.zeros(len(self.joint_actions))
+        feasible = np.where(c_actions <= self.rho + 1e-12)[0]
+        if len(feasible) > 0:
+            gamma[int(feasible[np.argmax(f_actions[feasible])])] = 1.0
+        else:
+            gamma[int(np.argmin(c_actions))] = 1.0
         return gamma
 
     def update(self, utilities, costs):
