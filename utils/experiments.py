@@ -450,35 +450,37 @@ def compute_clairvoyant_dynamic_multi(
 
 
 # ---------------------------------------------------------------------------
-# Requirement 3 – Multi-trial runner with optional cache support
+# Requirement 3 – Multi-trial runner
 # ---------------------------------------------------------------------------
 
 
 def run_primal_dual_trials(
     env_factory, agent_factory, n_trials,
     opt_per_round=None,
-    clairvoyant_cache=None,
     name="req3",
 ):
     """
     Multi-trial loop for the primal-dual agent (Requirement 3).
 
-    Three baseline modes (resolved per-trial in this priority order):
+    Baseline (resolved per-trial):
 
-      1. ``clairvoyant_cache[seed]`` is set
-         → use the precomputed dynamic clairvoyant for this seed.
-         Produced by ``precompute_clairvoyant.py``.  Each entry is either
-         a float (interpreted as ``opt_per_round``) or a dict with key
-         ``"opt_per_round"``.
-
-      2. ``opt_per_round`` is set (and not None)
+      1. ``opt_per_round`` is set (and not None)
          → use it as a fixed per-round baseline across all trials.
          Stochastic regime: cheap, computed once via
-         ``compute_clairvoyant_multi``.
+         ``compute_clairvoyant_multi`` on the true win probabilities.
 
-      3. Both are None
-         → compute the dynamic clairvoyant on the fly inside the trial
-         loop.  Adversarial regime without a cache: correct but slow.
+      2. ``opt_per_round`` is None
+         → OPT^A: the best FIXED distribution in hindsight (NB08 cells
+         8-11), computed per trial from the empirical win probabilities
+         of that trial's realised m-sequence
+         (``env.empirical_win_probabilities()``) fed into the same
+         ``compute_clairvoyant_multi`` LP.  This -- not the best DYNAMIC
+         sequence in hindsight -- is the benchmark against which a
+         primal-dual (Hedge+OGD) regret minimiser has a provable
+         sublinear-regret guarantee in adversarial / non-stationary
+         settings; comparing against a per-round-adaptive dynamic
+         optimum instead makes the regret linear by construction,
+         regardless of how good the agent is.
 
     Differences from ``run_multi_campaign_trials``
     ----------------------------------------------
@@ -492,9 +494,6 @@ def run_primal_dual_trials(
     agent_factory     : callable() -> PrimalDualMultiCampaignAgent
     n_trials          : int
     opt_per_round     : float | None
-    clairvoyant_cache : dict[int, float | dict] | None
-        Seed → cached opt_per_round (or full result dict).  Loaded from
-        the pickle produced by ``precompute_clairvoyant.py``.
     name              : str   pickle filename stem
 
     Returns
@@ -505,12 +504,7 @@ def run_primal_dual_trials(
         mean_lmbd, std_lmbd      : (T,) array
         n_trials                 : int
     """
-    if clairvoyant_cache is not None:
-        mode = f"adversarial (cache, {len(clairvoyant_cache)} entries)"
-    elif opt_per_round is not None:
-        mode = "stochastic (fixed OPT)"
-    else:
-        mode = "adversarial (per-trial dynamic OPT)"
+    mode = "stochastic (fixed OPT)" if opt_per_round is not None else "adversarial (per-trial OPT^A, fixed-hindsight)"
     logger.info("Running %d trials – %s — %s", n_trials, name, mode)
 
     regret_per_trial   = []
@@ -523,12 +517,13 @@ def run_primal_dual_trials(
         agent = agent_factory()
 
         # Per-trial baseline resolution
-        trial_opt = _resolve_trial_opt(
-            seed=i,
-            cache=clairvoyant_cache,
-            fixed=opt_per_round,
-            env=env,
-        )
+        if opt_per_round is not None:
+            trial_opt = float(opt_per_round)
+        else:
+            win_probs = env.empirical_win_probabilities()
+            _, trial_opt = compute_clairvoyant_multi(
+                env.values, env.bid_sets, env.rho, win_probs, env.conflict_edges,
+            )
 
         utilities = np.zeros(env.T)
         costs     = np.zeros(env.T)
@@ -568,37 +563,11 @@ def run_primal_dual_trials(
     return out
 
 
-def _resolve_trial_opt(seed, cache, fixed, env):
-    """
-    Pick the per-round baseline for a single trial.
-
-    Priority: cache hit > fixed > on-the-fly LP.
-    """
-    if cache is not None and seed in cache:
-        entry = cache[seed]
-        if isinstance(entry, dict):
-            return float(entry["opt_per_round"])
-        return float(entry)        # plain float
-
-    if fixed is not None:
-        return float(fixed)
-
-    # Fallback: compute now
-    if cache is not None:
-        logger.warning("Cache miss for seed=%d, computing dynamic OPT on the fly.",
-                       seed)
-    _, trial_opt = compute_clairvoyant_dynamic_multi(
-        m_seq          = env.m,
-        values         = env.values,
-        bid_sets       = env.bid_sets,
-        budget         = env.budget,
-        conflict_edges = env.conflict_edges,
-    )
-    return trial_opt
-
-
 # ---------------------------------------------------------------------------
-# Cache loader -- convenience wrapper
+# Cache loader -- convenience wrapper (used by precomputed_clairvoyant.py /
+# compute_clairvoyant_dynamic_multi for illustrative dynamic-OPT reporting,
+# not by run_primal_dual_trials' regret baseline any more -- see NB08 cells
+# 8-11 and the docstring of run_primal_dual_trials above)
 # ---------------------------------------------------------------------------
 
 

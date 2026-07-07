@@ -18,11 +18,18 @@ regime, and `run_req3.py` can pick the right one based on its `ENV_MODE`.
 
 Usage
 -----
-    python -m utils.precompute_clairvoyant
+    Run from inside the utils/ directory (this script uses bare imports,
+    e.g. `from environments import ...`, not package-relative ones):
+
+        cd Project/utils
+        python precomputed_clairvoyant.py
 
 The cache key is a hash of the relevant problem parameters:
   (T, N, values, budget, conflict_edges, available_bids, n_competitors, mode)
 plus the seed.  Changing any of these invalidates the cache for that key.
+All of these parameters -- and the hashing function itself -- live in
+req3_config.py, which run_req3.py also imports, so the two scripts can
+never drift apart again.
 
 Output
 ------
@@ -30,58 +37,32 @@ data/picklefiles/clairvoyant_dyn_{key}.pkl  — dict {seed: opt_per_round}
                                               one file per mode
 """
 
-import hashlib
 import logging
 import pickle
 import time
-from pathlib import Path
-
-import numpy as np
 
 from environments import AdversarialMultiCampaignEnv
 from experiments  import compute_clairvoyant_dynamic_multi, DATA_DIR
+from req3_config  import (
+    VALUES, T, BUDGET, N_COMPETITORS, CONFLICT_EDGES, AVAILABLE_BIDS,
+    N_TRIALS, make_cache_key,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(message)s")
 logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Configuration -- mirror run_req3.py here so the cache is consistent
+# Configuration -- imported from req3_config.py so it is always in sync
+# with run_req3.py.  Only the modes to precompute are local to this script.
 # ---------------------------------------------------------------------------
 
-T               = 10_000
-VALUES          = [0.8, 0.6, 0.9, 0.7]
-BUDGET          = 1_600.0
-N_COMPETITORS   = [3, 3, 3, 3]
-CONFLICT_EDGES  = [(0, 1), (2, 3)]
-AVAILABLE_BIDS  = np.linspace(0, 1, 11)
-N_TRIALS        = 20
-SEEDS           = list(range(N_TRIALS))
+SEEDS = list(range(N_TRIALS))
 
 # Non-stationarity patterns to precompute.  Each produces a separate cache
 # file with its own hash key.  Trim the list to just one mode if you only
 # care about one regime.
-MODES           = ["drift", "shocks"]
-
-
-# ---------------------------------------------------------------------------
-# Cache key — a short stable hash of the problem parameters
-# ---------------------------------------------------------------------------
-
-def make_cache_key(T, values, budget, conflict_edges, available_bids,
-                   n_competitors, env_class_name, mode):
-    """Short hex digest that changes whenever any LP-relevant parameter changes."""
-    payload = repr((
-        env_class_name,
-        int(T),
-        tuple(float(v) for v in values),
-        float(budget),
-        tuple(sorted(tuple(e) for e in conflict_edges)),
-        tuple(float(b) for b in available_bids),
-        tuple(int(n) for n in n_competitors),
-        str(mode),
-    ))
-    return hashlib.sha1(payload.encode()).hexdigest()[:12]
+MODES = ["drift", "shocks"]
 
 
 # ---------------------------------------------------------------------------

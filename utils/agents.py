@@ -535,8 +535,12 @@ class PrimalDualMultiCampaignAgent:
         ]
 
         # --- Dual: shared Lagrange multiplier ------------------------------
-        # NB08 initialises lmbd = 1 (inside the feasible range)
-        self.lmbd = 1.0
+        # Start at 0: Hedge first learns to maximise utility unconstrained,
+        # then lambda rises until the budget constraint is met.
+        # NB08 uses lmbd=1 which works for rho≈0.4 (lmbd_max=2.5), but with
+        # rho=0.05 (lmbd_max=20) starting at 1 immediately penalises costs
+        # so heavily that Hedge converges to no-bid before lambda can correct.
+        self.lmbd = 0.0
 
         # --- State ---------------------------------------------------------
         self.A_t     = None          # sampled actions (length N)
@@ -630,9 +634,14 @@ class PrimalDualMultiCampaignAgent:
             return
 
         # === Step 1: Dual OGD update =======================================
-        # Use the realised stochastic cost (c_t.sum()) instead of expected_cost.
-        # It is unbiased and accounts for the conflict-graph suppressions
-        # already applied by MultiCampaignEnv.round.
+        # Use the realised total cost c_t.sum() as the OGD gradient signal.
+        # The conflict graph is already enforced by the environment, so
+        # c_t.sum() is an unbiased estimate of the true expected cost under
+        # the joint distribution (including conflict suppression).  Using the
+        # sum of per-campaign expected costs E[c_i | x_t] instead overestimates
+        # the true cost by roughly 2x (both endpoints of each conflict edge are
+        # counted), which drives lambda far too high and makes Hedge converge
+        # to the no-bid arm.
         lmbd_before = self.lmbd
         realised_cost = float(c_t.sum())
         grad = self.rho - realised_cost
@@ -676,17 +685,23 @@ class PrimalDualMultiCampaignAgent:
             primal_reward = f_full_i - lmbd_before * c_full_i
 
             # --- Loss normalisation to [0,1] -----------------------------
-            # Reward range:  upper bound = v_i (cost zero, lambda zero),
-            #                lower bound = -lmbd_max * b_max_i.
+            # Reward range at the CURRENT lambda:
+            #   upper bound = v_i  (bid wins, cost → 0)
+            #   lower bound = -lmbd_before * max_bid  (highest bid wins)
+            # Using lmbd_max in the denominator instead would compress all
+            # losses to ~[0, v_i/(v_i + lmbd_max*max_bid)] ≈ [0, 0.05],
+            # making Hedge updates negligibly small and preventing learning.
             max_r   = self.values[i]
-            range_r = max_r + self._lmbd_max * float(self.bid_sets[i].max())
-            # Higher reward → smaller loss; clip handles any numerical slack.
+            range_r = max_r + lmbd_before * float(self.bid_sets[i].max())
+            if range_r < 1e-10:
+                range_r = max_r
             loss_i = (max_r - primal_reward) / range_r
             loss_i = np.clip(loss_i, 0.0, 1.0)
 
             self.hedge_agents[i].update(loss_i)
 
         # === Budget tracking + history =====================================
+        realised_cost = float(c_t.sum())
         self.budget -= realised_cost
         self.lmbds_history.append(self.lmbd)
         self.cost_history.append(realised_cost)

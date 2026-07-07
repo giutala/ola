@@ -12,13 +12,20 @@ pattern).
 Two experiments
 ---------------
 A. Stochastic environment (MultiCampaignEnv, NB07 setup) — baseline is the
-   fixed LP optimum (compute_clairvoyant_multi).  No LP solved per trial.
+   fixed LP optimum (compute_clairvoyant_multi), computed once from the
+   true win probabilities.
 
-B. Adversarial / non-stationary environment
-   (AdversarialMultiCampaignEnv) — baseline is the best dynamic feasible
-   sequence in hindsight (compute_clairvoyant_dynamic_multi), computed
-   per trial.  If a cache produced by precompute_clairvoyant.py is
-   available it is used; otherwise the LP is solved on the fly (slow).
+B. Adversarial / non-stationary environment (AdversarialMultiCampaignEnv)
+   — baseline is OPT^A, the best FIXED distribution in hindsight (NB08
+   cells 8-11), computed per trial from the empirical win probabilities
+   of that trial's realised m-sequence (env.empirical_win_probabilities)
+   fed into the same compute_clairvoyant_multi LP.  This is the benchmark
+   a primal-dual (Hedge+OGD) regret minimiser actually has a provable
+   sublinear-regret guarantee against, in both the stochastic and the
+   adversarial regime -- the "best-of-both-worlds" property.  Comparing
+   against the best DYNAMIC sequence in hindsight instead (a per-round-
+   adaptive benchmark) makes regret linear by construction in a "highly
+   non-stationary" environment, regardless of how good the agent is.
 
 T=10_000 matches R1 / R2 for a valid cross-requirement regret comparison.
 B scaled so rho=0.16 is unchanged.
@@ -35,35 +42,30 @@ from utils.agents import PrimalDualMultiCampaignAgent
 from utils.environments import MultiCampaignEnv, AdversarialMultiCampaignEnv
 from utils.experiments import (
     compute_clairvoyant_multi,
-    load_clairvoyant_cache,
     plot_budget,
     plot_lambda,
     plot_regret,
     run_primal_dual_trials,
     OUTPUTS_DIR,
 )
+from utils.req3_config import (
+    VALUES, T, BUDGET, N_TRIALS, N_COMPETITORS, CONFLICT_EDGES,
+    AVAILABLE_BIDS,
+)
 
 logger = logging.getLogger(__name__)
 
 # ── Parameters ──────────────────────────────────────────────────────────────
-VALUES         = [0.8, 0.6, 0.9, 0.7]
-T              = 10_000
-BUDGET         = 1_600.0               
-N_TRIALS       = 20
-N_COMPETITORS  = [3, 3, 3, 3]
-CONFLICT_EDGES = [(0, 1), (2, 3)]
-AVAILABLE_BIDS = np.linspace(0, 1, 11)
+# VALUES, T, BUDGET, N_TRIALS, N_COMPETITORS, CONFLICT_EDGES, AVAILABLE_BIDS
+# all come from utils/req3_config.py, the single source of truth shared with
+# precompute_clairvoyant.py. Change them there, not here, so the two scripts
+# can never drift apart again.
 
 # Non-stationarity pattern of the adversarial environment.
 #   'drift'  : m_t ~ Beta with sinusoidal mean — changes every round
 #   'shocks' : piecewise-stationary, distribution changes per block
 # Switch this single constant to compare the two regimes.
-ENV_MODE = "drift"
-
-# Cache key (12-char hex) produced by precompute_clairvoyant.py.
-# Set to None to skip the cache; the runner will fall back to live LPs
-# (slow but correct).  See precompute_clairvoyant.py logs for the value.
-CLAIRVOYANT_CACHE_KEY = None
+ENV_MODE = "drift"  # "drift" or "shocks"
 
 
 
@@ -140,23 +142,15 @@ def run_req3():
             conflict_edges=CONFLICT_EDGES, seed=seed, mode=ENV_MODE,
         )
 
-    # Try to use the cache produced by precompute_clairvoyant.py.
-    cache = {}
-    if CLAIRVOYANT_CACHE_KEY is not None:
-        cache = load_clairvoyant_cache(CLAIRVOYANT_CACHE_KEY)
-    if not cache:
-        logger.warning(
-            "No clairvoyant cache loaded — the dynamic LP will be solved "
-            "on the fly for each trial (slow).  Run precompute_clairvoyant.py "
-            "and set CLAIRVOYANT_CACHE_KEY to skip this."
-        )
-
+    # No opt_per_round given -> run_primal_dual_trials computes OPT^A (best
+    # fixed distribution in hindsight) per trial from the empirical win
+    # probabilities of that trial's realised m-sequence. See NB08 cells 8-11
+    # and the run_primal_dual_trials docstring in experiments.py.
     res_adv = run_primal_dual_trials(
-        env_factory       = env_factory_adv,
-        agent_factory     = make_agent,
-        n_trials          = N_TRIALS,
-        clairvoyant_cache = cache or None,    # Mode A if cache, Mode C otherwise
-        name              = "req3_adversarial",
+        env_factory   = env_factory_adv,
+        agent_factory = make_agent,
+        n_trials      = N_TRIALS,
+        name          = "req3_adversarial",
     )
 
     # ─────────────────────────────────────────────────────────────────────
