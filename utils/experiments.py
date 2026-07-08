@@ -163,6 +163,106 @@ def compute_clairvoyant_multi(
     return x_list, float(opt_utility)
 
 
+def _build_feasible_joint_actions(bid_sets, conflict_edges=None):
+    """Enumerate joint actions with abstention (-1) and conflict constraints."""
+    N = len(bid_sets)
+    edge_set = {tuple(sorted(edge)) for edge in conflict_edges or []}
+    actions = []
+    current = [-1] * N
+    active = set()
+
+    def compatible(campaign):
+        return all(tuple(sorted((campaign, other))) not in edge_set
+                   for other in active)
+
+    def backtrack(i):
+        if i == N:
+            actions.append(tuple(current))
+            return
+
+        current[i] = -1
+        backtrack(i + 1)
+
+        if compatible(i):
+            active.add(i)
+            for k in range(len(bid_sets[i])):
+                current[i] = k
+                backtrack(i + 1)
+            active.remove(i)
+            current[i] = -1
+
+    backtrack(0)
+    return actions
+
+
+def compute_piecewise_expected_clairvoyant(env):
+    """
+    Distributional clairvoyant for Requirement 4's shock environment.
+
+    The oracle knows the stationary blocks and their Beta distributions, but
+    not the realised competing bids m_t. It solves one LP over one mixed action
+    per block, with the original shared budget coupled across all blocks.
+
+    Returns
+    -------
+    opt_total : float
+        Expected total utility over the horizon.
+    expected_per_round : np.ndarray shape (T,)
+        Blockwise expected utility used for cumulative regret plots.
+    """
+    blocks = env.piecewise_win_probabilities()
+    actions = _build_feasible_joint_actions(env.bid_sets, env.conflict_edges)
+    n_blocks = len(blocks)
+    n_actions = len(actions)
+    n_vars = n_blocks * n_actions
+
+    values = np.asarray(env.values, dtype=float)
+    f = np.zeros(n_vars)
+    c = np.zeros(n_vars)
+    lengths = np.zeros(n_blocks, dtype=float)
+
+    for s, (start, end, win_prob_list) in enumerate(blocks):
+        length = end - start
+        lengths[s] = length
+        for a_idx, action in enumerate(actions):
+            var_idx = s * n_actions + a_idx
+            for i, k in enumerate(action):
+                if k >= 0:
+                    p_win = win_prob_list[i][k]
+                    bid = env.bid_sets[i][k]
+                    f[var_idx] += length * (values[i] - bid) * p_win
+                    c[var_idx] += length * bid * p_win
+
+    A_eq = np.zeros((n_blocks, n_vars))
+    for s in range(n_blocks):
+        A_eq[s, s * n_actions:(s + 1) * n_actions] = 1.0
+
+    res = optimize.linprog(
+        -f,
+        A_ub=np.array([c]),
+        b_ub=np.array([env.budget]),
+        A_eq=A_eq,
+        b_eq=np.ones(n_blocks),
+        bounds=[(0.0, 1.0)] * n_vars,
+        method="highs",
+    )
+    if not res.success:
+        logger.warning("Piecewise expected clairvoyant LP failed: %s", res.message)
+        return 0.0, np.zeros(env.T)
+
+    gamma = np.clip(res.x, 0.0, 1.0)
+    expected_per_round = np.zeros(env.T)
+    for s, (start, end, _) in enumerate(blocks):
+        sl = slice(s * n_actions, (s + 1) * n_actions)
+        block_total_utility = float(np.dot(gamma[sl], f[sl]))
+        expected_per_round[start:end] = block_total_utility / lengths[s]
+
+    opt_total = -float(res.fun)
+    logger.info("Piecewise expected clairvoyant | T=%d blocks=%d total_utility=%.3f per_round=%.4f",
+                env.T, n_blocks, opt_total, opt_total / env.T)
+    return opt_total, expected_per_round
+
+
 # ---------------------------------------------------------------------------
 # Multi-trial runners
 # ---------------------------------------------------------------------------
@@ -337,7 +437,7 @@ def plot_regret(
     path.parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(path, dpi=150)
     logger.info("Saved plot to %s", path)
-    plt.show()
+    # Keep batch runs non-interactive; figures are saved before close().
     plt.close()
 
 
@@ -362,7 +462,7 @@ def plot_ucb1_bound_check(results, upper_bound, title, filename):
     path.parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(path, dpi=150)
     logger.info("Saved UCB1 bound check to %s", path)
-    plt.show()
+    # Keep batch runs non-interactive; figures are saved before close().
     plt.close()
 
 
@@ -385,7 +485,7 @@ def plot_ucb1_bound_ratio(results, upper_bound, title, filename):
     path.parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(path, dpi=150)
     logger.info("Saved UCB1 bound ratio to %s", path)
-    plt.show()
+    # Keep batch runs non-interactive; figures are saved before close().
     plt.close()
 
 
@@ -411,7 +511,7 @@ def plot_average_regret(results, title, filename):
     path.parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(path, dpi=150)
     logger.info("Saved average regret plot to %s", path)
-    plt.show()
+    # Keep batch runs non-interactive; figures are saved before close().
     plt.close()
 
 
@@ -457,7 +557,7 @@ def plot_competing_bid_distribution(env, title, filename):
     path.parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(path, dpi=150)
     logger.info("Saved competing bid distribution plot to %s", path)
-    plt.show()
+    # Keep batch runs non-interactive; figures are saved before close().
     plt.close()
 
 
@@ -500,7 +600,7 @@ def plot_multi_competing_bid_distributions(env, title, filename):
     path.parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(path, dpi=150)
     logger.info("Saved multi-campaign bid distribution plot to %s", path)
-    plt.show()
+    # Keep batch runs non-interactive; figures are saved before close().
     plt.close()
 
 
@@ -542,7 +642,7 @@ def plot_pairwise_joint_bid_distributions(env, title, filename):
     path.parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(path, dpi=150)
     logger.info("Saved pairwise joint bid distribution plot to %s", path)
-    plt.show()
+    # Keep batch runs non-interactive; figures are saved before close().
     plt.close()
 
 
@@ -567,7 +667,7 @@ def plot_budget(results, budget, title="Cumulative Cost", filename="budget.png")
     path.parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(path, dpi=150)
     logger.info("Saved plot to %s", path)
-    plt.show()
+    # Keep batch runs non-interactive; figures are saved before close().
     plt.close()
 
 
@@ -585,5 +685,285 @@ def plot_chosen_bids(agent, available_bids, title="Chosen Bids", filename="bids.
     path.parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(path, dpi=150)
     logger.info("Saved plot to %s", path)
-    plt.show()
+    # Keep batch runs non-interactive; figures are saved before close().
+    plt.close()
+
+
+# ---------------------------------------------------------------------------
+# Requirements 3 and 4 -- dynamic clairvoyant, multi-trial runner, extra plots
+# ---------------------------------------------------------------------------
+
+
+def compute_clairvoyant_dynamic_multi(m_seq, values, bid_sets, budget, conflict_edges=None):
+    """
+    Best dynamic feasible sequence of bids in hindsight (project spec p.9),
+    used for Requirements 3 AND 4.
+
+    Solves one LP over the ENTIRE horizon, knowing every realised m_t:
+
+        max  sum_{t,i,k} y_{t,i,k} (v_i - b_{i,k}) 1[b_{i,k} >= m_{t,i}]
+        s.t. sum_{t,i,k} y_{t,i,k} b_{i,k} 1[b_{i,k} >= m_{t,i}] <= B
+             sum_k y_{t,i,k} <= 1                    for all t, i
+             sum_k y_{t,i,k} + sum_k y_{t,j,k} <= 1   for all t, (i,j) in E
+             0 <= y_{t,i,k} <= 1
+
+    Why this instead of a cheaper "recompute the static LP once per
+    stationary interval" clairvoyant for Requirement 4: within one
+    interval, m_t is still a fresh i.i.d. draw each round, not a repeated
+    constant. A clairvoyant with full hindsight can react to the SPECIFIC
+    realised m_t each round, not just to the interval's underlying
+    distribution -- by Jensen's inequality, E[max_k f_k(m_t)] >=
+    max_k E[f_k(m_t)], so the true dynamic-in-hindsight optimum is weakly
+    HIGHER than the best static mixture for the interval. Using the
+    cheaper benchmark would silently understate regret. This is expensive
+    (~440k variables for T=10000, N=4, K=11) -- see
+    precompute_clairvoyant.py for a caching utility.
+
+    Returns
+    -------
+    opt_utility_total, opt_utility_per_round : float, float
+    """
+    from scipy.sparse import csr_matrix
+
+    m_seq = np.asarray(m_seq)
+    N, T = m_seq.shape
+    values = np.asarray(values, dtype=float)
+    Ks = [len(bs) for bs in bid_sets]
+    offsets = [0] + list(np.cumsum(Ks))
+    NK = offsets[-1]
+    n_vars = T * NK
+    edges = conflict_edges or []
+
+    f_flat = np.zeros(n_vars)
+    c_flat = np.zeros(n_vars)
+    for t in range(T):
+        m_t = m_seq[:, t]
+        for i in range(N):
+            wins = bid_sets[i] >= m_t[i]
+            base = t * NK + offsets[i]
+            f_flat[base:base + Ks[i]] = (values[i] - bid_sets[i]) * wins
+            c_flat[base:base + Ks[i]] = bid_sets[i] * wins
+
+    rows, cols, data = [], [], []
+    nz = np.where(c_flat > 0)[0]
+    rows.extend([0] * len(nz)); cols.extend(nz.tolist()); data.extend(c_flat[nz].tolist())
+
+    row_idx = 1
+    for t in range(T):
+        for i in range(N):
+            base = t * NK + offsets[i]
+            rows.extend([row_idx] * Ks[i])
+            cols.extend(range(base, base + Ks[i]))
+            data.extend([1.0] * Ks[i])
+            row_idx += 1
+
+    for t in range(T):
+        for (ei, ej) in edges:
+            base_i = t * NK + offsets[ei]
+            base_j = t * NK + offsets[ej]
+            rows.extend([row_idx] * (Ks[ei] + Ks[ej]))
+            cols.extend(range(base_i, base_i + Ks[ei]))
+            cols.extend(range(base_j, base_j + Ks[ej]))
+            data.extend([1.0] * (Ks[ei] + Ks[ej]))
+            row_idx += 1
+
+    A_ub = csr_matrix((data, (rows, cols)), shape=(row_idx, n_vars))
+    b_ub = np.empty(row_idx)
+    b_ub[0] = budget
+    b_ub[1:] = 1.0
+
+    res = optimize.linprog(-f_flat, A_ub=A_ub, b_ub=b_ub, bounds=(0.0, 1.0), method="highs")
+    if not res.success:
+        logger.warning("Dynamic clairvoyant LP failed: %s", res.message)
+        return 0.0, 0.0
+
+    opt_total = -float(res.fun)
+    logger.info("Dynamic clairvoyant | T=%d N=%d total_utility=%.3f per_round=%.4f",
+                T, N, opt_total, opt_total / T)
+    return opt_total, opt_total / T
+
+
+def run_nonstationary_trials(env_factory, agent_factory, n_trials, name="req3",
+                              clairvoyant_cache=None):
+    """
+    Requirement 3 / 4 multi-trial loop: fresh env + agent per trial,
+    dynamic clairvoyant baseline (cached if available, else computed on
+    the fly -- see precompute_clairvoyant.py), automatic dispatch between
+    semi-bandit agents (update(f,c)) and full-feedback agents
+    (update(f,c,m), detected via the `hedge_agents` attribute unique to
+    PrimalDualMultiCampaignAgent).
+
+    Returns a dict with mean_regret, std_regret, mean_cumcost, n_trials,
+    plus mean_lmbd/std_lmbd (if the agent tracks lmbds_history) and
+    resets_per_trial (if the agent tracks n_resets, e.g. the CUSUM agent).
+    """
+    logger.info("Running %d trials - %s (cache=%s)", n_trials, name,
+                "yes" if clairvoyant_cache else "no")
+
+    regret_per_trial, regret_piecewise_per_trial, payments_per_trial = [], [], []
+    lmbd_per_trial = []
+    resets_per_trial = []
+
+    for i in range(n_trials):
+        np.random.seed(i)
+        env = env_factory(seed=i)
+        agent = agent_factory()
+        full_feedback = hasattr(agent, "hedge_agents")
+
+        if clairvoyant_cache is not None and i in clairvoyant_cache:
+            trial_opt = float(clairvoyant_cache[i]["opt_per_round"])
+        else:
+            _, trial_opt = compute_clairvoyant_dynamic_multi(
+                m_seq=env.m, values=env.values, bid_sets=env.bid_sets,
+                budget=env.budget, conflict_edges=env.conflict_edges,
+            )
+
+        piecewise_expected = None
+        if hasattr(env, "piecewise_win_probabilities"):
+            try:
+                _, piecewise_expected = compute_piecewise_expected_clairvoyant(env)
+            except ValueError:
+                piecewise_expected = None
+
+        utilities = np.zeros(env.T)
+        costs = np.zeros(env.T)
+
+        for t in range(env.T):
+            A_t = agent.pull_arm()
+            f_t, c_t, m_t = env.round(A_t)
+            if full_feedback:
+                agent.update(f_t, c_t, m_t)
+            else:
+                agent.update(f_t, c_t)
+            utilities[t] = f_t.sum()
+            costs[t] = c_t.sum()
+
+        regret_per_trial.append(np.cumsum(trial_opt - utilities))
+        if piecewise_expected is not None:
+            regret_piecewise_per_trial.append(np.cumsum(piecewise_expected - utilities))
+        payments_per_trial.append(np.cumsum(costs))
+
+        if hasattr(agent, "lmbds_history"):
+            lmbds = np.asarray(agent.lmbds_history, dtype=float)
+            if lmbds.size < env.T:
+                pad = lmbds[-1] if lmbds.size else 0.0
+                lmbds = np.pad(lmbds, (0, env.T - lmbds.size), constant_values=pad)
+            lmbd_per_trial.append(lmbds[:env.T])
+
+        if hasattr(agent, "n_resets"):
+            resets_per_trial.append(sum(int(n.sum()) for n in agent.n_resets))
+
+    regret_per_trial = np.array(regret_per_trial)
+    regret_piecewise_per_trial = np.array(regret_piecewise_per_trial)
+    payments_per_trial = np.array(payments_per_trial)
+    out = dict(
+        mean_regret=regret_per_trial.mean(axis=0),
+        std_regret=regret_per_trial.std(axis=0),
+        mean_cumcost=payments_per_trial.mean(axis=0),
+        n_trials=n_trials,
+    )
+    if regret_piecewise_per_trial.size:
+        out["mean_regret_piecewise"] = regret_piecewise_per_trial.mean(axis=0)
+        out["std_regret_piecewise"] = regret_piecewise_per_trial.std(axis=0)
+    if lmbd_per_trial:
+        lmbd_arr = np.array(lmbd_per_trial)
+        out["mean_lmbd"] = lmbd_arr.mean(axis=0)
+        out["std_lmbd"] = lmbd_arr.std(axis=0)
+    if resets_per_trial:
+        out["resets_per_trial"] = resets_per_trial
+        out["mean_resets"] = float(np.mean(resets_per_trial))
+
+    path = DATA_DIR / f"{name}_results.pkl"
+    with open(path, "wb") as f:
+        pickle.dump(out, f)
+    logger.info("Saved results to %s", path)
+    return out
+
+
+def load_clairvoyant_cache(key_or_path):
+    """Load a cache produced by precompute_clairvoyant.py. Returns {} if missing."""
+    p = Path(key_or_path)
+    if not p.is_absolute() and not p.exists():
+        p = DATA_DIR / f"clairvoyant_dyn_{key_or_path}.pkl"
+    if not p.exists():
+        logger.warning("No clairvoyant cache at %s -- will compute on the fly (slow).", p)
+        return {}
+    with open(p, "rb") as f:
+        cache = pickle.load(f)
+    logger.info("Loaded clairvoyant cache from %s (%d entries)", p, len(cache))
+    return cache
+
+
+def plot_lambda(results, title=r"Lagrange multiplier $\lambda_t$", filename="lambda.png"):
+    fig, ax = plt.subplots(figsize=(9, 5))
+    T = len(next(iter(results.values()))["mean_lmbd"])
+    ts = np.arange(1, T + 1)
+    for label, res in results.items():
+        mean = res["mean_lmbd"]
+        stderr = res["std_lmbd"] / np.sqrt(res["n_trials"])
+        ax.plot(ts, mean, label=label)
+        ax.fill_between(ts, mean - stderr, mean + stderr, alpha=0.25)
+    ax.set_xlabel("$t$")
+    ax.set_ylabel(r"$\lambda_t$")
+    ax.set_title(title)
+    ax.legend()
+    ax.grid(True, linestyle="--", alpha=0.4)
+    plt.tight_layout()
+    path = OUTPUTS_DIR / filename
+    path.parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(path, dpi=150)
+    logger.info("Saved plot to %s", path)
+    # Keep batch runs non-interactive; figures are saved before close().
+    plt.close()
+
+
+def plot_resets_histogram(resets_per_trial, title, filename):
+    fig, ax = plt.subplots(figsize=(7, 4))
+    bins = range(0, max(resets_per_trial + [1]) + 2)
+    ax.hist(resets_per_trial, bins=bins)
+    ax.set_xlabel("Total CUSUM resets fired (per trial)")
+    ax.set_ylabel("Number of trials")
+    ax.set_title(title)
+    plt.tight_layout()
+    path = OUTPUTS_DIR / filename
+    path.parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(path, dpi=150)
+    logger.info("Saved plot to %s", path)
+    # Keep batch runs non-interactive; figures are saved before close().
+    plt.close()
+
+
+def plot_depletion_annotated(results, budget, title, filename):
+    """
+    Honest version of the "exploration ends" annotation: mark the ROUND
+    where cumulative cost first reaches the budget (real depletion event),
+    not an inferred curvature kink.
+    """
+    fig, ax = plt.subplots(figsize=(9, 5))
+    T = len(next(iter(results.values()))["mean_regret"])
+    ts = np.arange(1, T + 1)
+    for label, res in results.items():
+        mean = res["mean_regret"]
+        stderr = res["std_regret"] / np.sqrt(res["n_trials"])
+        line, = ax.plot(ts, mean, label=label)
+        ax.fill_between(ts, mean - stderr, mean + stderr, alpha=0.2, color=line.get_color())
+
+        cumcost = res["mean_cumcost"]
+        depleted = np.where(cumcost >= budget - 1e-6)[0]
+        if depleted.size:
+            t_dep = int(depleted[0])
+            ax.axvline(t_dep, color=line.get_color(), linestyle=":", linewidth=1.2)
+            ax.annotate(f"{label}\nbudget exhausted t~{t_dep}",
+                        xy=(t_dep, mean[t_dep]), fontsize=7, color=line.get_color())
+
+    ax.set_xlabel("$t$")
+    ax.set_ylabel("Cumulative Pseudo-Regret")
+    ax.set_title(title)
+    ax.legend()
+    ax.grid(True, linestyle="--", alpha=0.4)
+    plt.tight_layout()
+    path = OUTPUTS_DIR / filename
+    path.parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(path, dpi=150)
+    logger.info("Saved plot to %s", path)
     plt.close()

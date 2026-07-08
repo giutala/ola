@@ -20,6 +20,7 @@ CombinatorialUCBAgent ← NB09 cell 30  (UCBMatchingAgent) adapted for
 
 import logging
 import pickle
+from collections import deque
 from pathlib import Path
 
 import numpy as np
@@ -416,3 +417,385 @@ class CombinatorialUCBAgent:
             pickle.dump(self, f)
         logger.info("Saved agent to %s", path)
         return path
+
+
+# ---------------------------------------------------------------------------
+# Requirement 3 -- Primal-Dual, best-of-both-worlds, multiple campaigns
+# ---------------------------------------------------------------------------
+#
+# Unaffected by the Requirement 1/2 fallback bug and by the empirical-cost
+# question above: this agent never solves an LP with plug-in cost estimates.
+# The budget is managed by continuously adjusting a dual variable lambda_t
+# instead -- see the class docstring for the exact mechanism
+# (Practical/08_constrained_problems.ipynb cell 16, OGDHedgeSingleKnapsackAgent,
+# extended to N campaigns + a shared budget + a conflict graph).
+
+class _HedgeAgent:
+    """Hedge / exponential weights, full feedback (Practical/08 cell 15)."""
+
+    def __init__(self, K, eta):
+        self.K = K
+        self.eta = eta
+        self.weights = np.ones(K, dtype=float)
+
+    def get_distribution(self):
+        return self.weights / self.weights.sum()
+
+    def update(self, loss_t):
+        """loss_t in [0,1]^K."""
+        self.weights *= np.exp(-self.eta * loss_t)
+
+
+class PrimalDualMultiCampaignAgent:
+    """
+    Best-of-both-worlds bidding agent for N campaigns (Practical/08 cell 16,
+    OGDHedgeSingleKnapsackAgent, extended to N campaigns + a shared budget +
+    a conflict graph).
+
+    Primal: one Hedge per campaign (full feedback -> we observe m_t and can
+    compute the counterfactual (f, c) for every bid of every campaign).
+    Dual:   one shared OGD variable lambda in [0, 1/rho] for the budget.
+
+    Deviation from the lab's exact update rule, DOCUMENTED: the dual OGD
+    step here uses the REALISED total cost sum_i c_{t,i} rather than the
+    expected cost E_{x_t}[c_t] the lab computes component-wise. Reason: the
+    realised cost already reflects the conflict-graph suppression applied by
+    the environment; the bid-by-bid expectation would not. Trade-off: higher
+    gradient variance, mitigated by the standard eta_D = 1/sqrt(T).
+
+    Parameters
+    ----------
+    N, Ks, bid_sets, T, budget, values, conflict_edges : problem definition
+    hedge_eta, ogd_eta : float, optional (default per Practical/08 formulas)
+    """
+
+    def __init__(self, N, Ks, bid_sets, T, budget, values, conflict_edges=None,
+                 hedge_eta=None, ogd_eta=None):
+        self.N = N
+        self.Ks = Ks
+        self.bid_sets = [np.asarray(bs) for bs in bid_sets]
+        self.T = T
+        self.budget = float(budget)
+        self.rho = budget / T
+        self.values = np.asarray(values, dtype=float)
+        self.conflict_edges = conflict_edges or []
+        self._edge_set = {frozenset(e) for e in self.conflict_edges}
+
+        K_max = max(Ks)
+        self.hedge_eta = float(hedge_eta) if hedge_eta is not None else float(np.sqrt(np.log(max(K_max, 2)) / T))
+        self.ogd_eta = float(ogd_eta) if ogd_eta is not None else 1.0 / np.sqrt(T)
+
+        self._lmbd_max = 1.0 / self.rho
+        self.hedge_agents = [_HedgeAgent(Ks[i], self.hedge_eta) for i in range(N)]
+        self.lmbd = 1.0
+
+        self.A_t = None
+        self.x_t = None
+        self.t = 0
+        self.N_pulls = [np.zeros(Ks[i]) for i in range(N)]
+
+        self.lmbds_history = []
+        self.cost_history = []
+        self.utility_history = []
+
+        logger.info(
+            "PrimalDualMultiCampaignAgent | N=%d Ks=%s T=%d B=%.1f rho=%.4f "
+            "hedge_eta=%.5f ogd_eta=%.5f edges=%s",
+            N, Ks, T, budget, self.rho, self.hedge_eta, self.ogd_eta, self.conflict_edges,
+        )
+
+    def pull_arm(self):
+        if self.budget < 1:
+            self.A_t = [-1] * self.N
+            self.x_t = [np.eye(1, k, 0).flatten() if k else np.array([]) for k in self.Ks]
+            return self.A_t
+
+        self.x_t = [self.hedge_agents[i].get_distribution() for i in range(self.N)]
+        self.A_t = [int(np.random.choice(self.Ks[i], p=self.x_t[i])) for i in range(self.N)]
+
+        # Proactive conflict resolution on the SAMPLED (not yet realised)
+        # actions: since the win outcome for this round is not known until
+        # after bidding, we resolve on the potential margin (value - bid),
+        # not on the (unknowable-yet) actual win.
+        active = np.array(self.A_t) >= 0
+        for (ei, ej) in self.conflict_edges:
+            if active[ei] and active[ej]:
+                u_i = self.values[ei] - self.bid_sets[ei][self.A_t[ei]]
+                u_j = self.values[ej] - self.bid_sets[ej][self.A_t[ej]]
+                if u_i >= u_j:
+                    self.A_t[ej] = -1
+                    active[ej] = False
+                else:
+                    self.A_t[ei] = -1
+                    active[ei] = False
+
+        for i in range(self.N):
+            if self.A_t[i] >= 0:
+                self.N_pulls[i][self.A_t[i]] += 1
+
+        return self.A_t
+
+    def update(self, f_t, c_t, m_t):
+        if self.budget < 1:
+            self.lmbds_history.append(self.lmbd)
+            self.cost_history.append(0.0)
+            self.utility_history.append(0.0)
+            self.t += 1
+            return
+
+        lmbd_before = self.lmbd
+        realised_cost = float(c_t.sum())
+        grad = self.rho - realised_cost
+        self.lmbd = float(np.clip(self.lmbd - self.ogd_eta * grad, 0.0, self._lmbd_max))
+
+        # Counterfactual full-feedback rewards for every bid of every
+        # campaign, with the SAME conflict-resolution rule the environment
+        # applies (higher-utility campaign keeps the win on a shared edge).
+        potential_u = np.zeros(self.N)
+        for j in range(self.N):
+            aj = self.A_t[j]
+            if aj >= 0 and self.bid_sets[j][aj] >= m_t[j]:
+                potential_u[j] = self.values[j] - self.bid_sets[j][aj]
+
+        for i in range(self.N):
+            wins_i = (self.bid_sets[i] >= m_t[i]).astype(float)
+            f_full_i = (self.values[i] - self.bid_sets[i]) * wins_i
+            c_full_i = self.bid_sets[i] * wins_i
+
+            for j in range(self.N):
+                if i == j or frozenset((i, j)) not in self._edge_set:
+                    continue
+                uj = potential_u[j]
+                if uj > 0:
+                    loses_conflict = f_full_i < uj
+                    f_full_i[loses_conflict] = 0.0
+                    c_full_i[loses_conflict] = 0.0
+
+            primal_reward = f_full_i - lmbd_before * c_full_i
+            max_r = self.values[i]
+            range_r = max_r + self._lmbd_max * float(self.bid_sets[i].max())
+            loss_i = np.clip((max_r - primal_reward) / range_r, 0.0, 1.0)
+            self.hedge_agents[i].update(loss_i)
+
+        self.budget -= realised_cost
+        self.lmbds_history.append(self.lmbd)
+        self.cost_history.append(realised_cost)
+        self.utility_history.append(float(f_t.sum()))
+        self.t += 1
+
+
+# ---------------------------------------------------------------------------
+# Requirement 4a -- Combinatorial-UCB + Sliding Window
+# ---------------------------------------------------------------------------
+#
+# Extends CombinatorialUCBAgent (above) exactly as it stands after the
+# Requirement 1/2 fix: empirical mean cost in the LP constraint (no
+# confidence padding), time-dependent confidence radius on the reward
+# (log(max(t,2))), utility optimism capped at range_i. Only the STATISTICS
+# feeding the LP change -- windowed instead of full-history -- everything
+# else (joint-action enumeration, LP oracle, safe fallback) is inherited
+# unchanged.
+
+class SlidingWindowCombinatorialUCBAgent(CombinatorialUCBAgent):
+    """
+    CombinatorialUCBAgent restricted to a trailing window of W ROUNDS
+    (Practical/10_nonstationary_bandits.ipynb cell 23, SW-UCB), applied per
+    (campaign, bid) cell.
+
+    The window is in TIME, not "last W pulls of this arm": an
+    under-explored cell must still forget stale data after W rounds, or
+    "recent" would silently mean "long ago" for it. O(1) amortised updates
+    via a shared deque.
+
+    Confidence radius uses log(min(t, W)) -- the anytime-correct version:
+    before the window has even filled up (t < W), log(t) is the honest
+    bound, not the fully-warmed-up log(W).
+
+    Parameters
+    ----------
+    W : int, optional
+        Window length. Default: Practical/10 cell 34's rule of thumb
+        W = 2*sqrt(T). TUNE THIS against the environment's regime-switch
+        period (see run_req4.py): with sum(K_i) cells substantially larger
+        than the lab's toy K=3, the textbook default under-samples and
+        keeps "forgetting" cells that have not actually changed.
+    """
+
+    def __init__(self, N, Ks, T, budget, values, conflict_edges=None, W=None):
+        super().__init__(N, Ks, T, budget, values, conflict_edges)
+        self.W = int(W) if W is not None else int(2 * np.sqrt(T))
+        if self.W < 1:
+            raise ValueError("W must be >= 1")
+
+        self.sum_f = [np.zeros(Ks[i]) for i in range(N)]
+        self.sum_c = [np.zeros(Ks[i]) for i in range(N)]
+        self.win_pulls = [np.zeros(Ks[i]) for i in range(N)]
+        self.history = deque()
+
+        logger.info("SlidingWindowCombinatorialUCBAgent | window=%d (on top of CombinatorialUCBAgent)", self.W)
+
+    def pull_arm(self):
+        if self.budget < 1:
+            self.A_t = [-1] * self.N
+            return self.A_t
+
+        log_term = np.log(min(max(self.t, 2), self.W))
+
+        f_ucb_list, cost_list = [], []
+        for i in range(self.N):
+            range_i = self.values[i]
+            n_i = self.win_pulls[i]
+            n_safe = np.maximum(n_i, 1)
+            avg_f_i = np.where(n_i == 0, 0.0, self.sum_f[i] / n_safe)
+            avg_c_i = np.where(n_i == 0, 0.0, self.sum_c[i] / n_safe)
+            beta_i = range_i * np.sqrt(2 * log_term / n_safe)
+
+            f_ucb_i = np.where(n_i == 0, range_i, np.minimum(range_i, avg_f_i + beta_i))
+            # Same choice as the fixed CombinatorialUCBAgent: empirical mean
+            # cost, no confidence padding (see Req1_Empirical_Cost_Justification).
+            cost_i = np.maximum(0.0, avg_c_i)
+            f_ucb_list.append(f_ucb_i)
+            cost_list.append(cost_i)
+
+        gamma_t = self._solve_lp(f_ucb_list, cost_list)
+        action_idx = int(np.random.choice(len(self.joint_actions), p=gamma_t))
+        self.A_t = list(self.joint_actions[action_idx])
+        return self.A_t
+
+    def update(self, utilities, costs):
+        record = []
+        for i, k in enumerate(self.A_t):
+            if k < 0:
+                continue
+            f, c = float(utilities[i]), float(costs[i])
+            record.append((i, k, f, c))
+            self.sum_f[i][k] += f
+            self.sum_c[i][k] += c
+            self.win_pulls[i][k] += 1
+
+            # Lifetime stats, diagnostics only (plot_chosen_bids etc.).
+            self.N_pulls[i][k] += 1
+            n = self.N_pulls[i][k]
+            self.avg_f[i][k] += (f - self.avg_f[i][k]) / n
+            self.avg_c[i][k] += (c - self.avg_c[i][k]) / n
+
+        self.history.append(record)
+        if len(self.history) > self.W:
+            for i, k, f, c in self.history.popleft():
+                self.sum_f[i][k] -= f
+                self.sum_c[i][k] -= c
+                self.win_pulls[i][k] -= 1
+
+        self.budget -= costs.sum()
+        self.t += 1
+
+
+# ---------------------------------------------------------------------------
+# Requirement 4b -- Combinatorial-UCB + CUSUM change detector
+# ---------------------------------------------------------------------------
+
+class CUSUMCombinatorialUCBAgent(CombinatorialUCBAgent):
+    """
+    CombinatorialUCBAgent + a per-(campaign,bid) CUSUM change detector
+    (Practical/10_nonstationary_bandits.ipynb cell 46, CUSUM-UCB; Page, 1954).
+
+    Detection signal: the WIN INDICATOR w = 1[bid >= m_t], recovered
+    exactly from the semi-bandit (utility, cost) pair as
+    w = 1 if (utility + cost) > 0 else 0 (utility+cost = value*w). This is
+    more principled than running CUSUM on the raw utility: what actually
+    changes across regimes is the win PROBABILITY (m_t's distribution),
+    not the campaign's value, so isolating the win indicator is the
+    correct signal to test for a shift.
+
+    CUSUM statistic per cell, reset independently on detection:
+      - first M pulls after a (re)start: build the reference mean mu0
+      - after that: g+ = max(0, g+ + (w - mu0 - eps))
+                    g- = max(0, g- + (mu0 - w - eps))
+        alarm if g+ > h or g- > h (eps is the standard CUSUM slack term
+        against mistaking noise for a shift).
+
+    On alarm: reset ONLY that cell's N_pulls/avg_f/avg_c to 0 -- the
+    inherited pull_arm then treats it as unexplored again automatically
+    (f_ucb capped at range_i, cost 0), no separate forced-pull bookkeeping
+    needed.
+
+    pull_arm is INHERITED, completely unchanged from CombinatorialUCBAgent
+    -- the fix already applied there (empirical cost, no premature
+    fallback) is exactly what this class needs too; only update() differs
+    (CUSUM check + per-cell reset before the inherited running-mean update).
+
+    Extra safety-net exploration (Practical/10 cell 46's alpha): with
+    probability alpha, ignore the LP and play a uniformly random FEASIBLE
+    joint action -- a guard against slow drifts too gradual for CUSUM to
+    flag.
+
+    Parameters
+    ----------
+    U_T : int
+        Prior upper bound on the number of regime changes any cell can
+        undergo -- used to derive M, h, alpha if not given explicitly.
+    """
+
+    def __init__(self, N, Ks, T, budget, values, conflict_edges=None,
+                 U_T=5, M=None, h=None, alpha=None, eps=0.05):
+        super().__init__(N, Ks, T, budget, values, conflict_edges)
+
+        U_T = max(int(U_T), 1)
+        self.U_T = U_T
+        self.M = int(M) if M is not None else max(int(np.log(T / U_T)), 5)
+        self.h = float(h) if h is not None else 2.0 * np.log(T / U_T)
+        self.alpha = float(alpha) if alpha is not None else float(np.sqrt(U_T * np.log(T / U_T) / T))
+        self.eps = float(eps)
+
+        self.cell_history = [[[] for _ in range(Ks[i])] for i in range(N)]
+        self.n_resets = [np.zeros(Ks[i]) for i in range(N)]
+        self.reset_log = []
+
+        logger.info(
+            "CUSUMCombinatorialUCBAgent | N=%d Ks=%s T=%d U_T=%d M=%d h=%.3f alpha=%.4f eps=%.3f B=%.1f",
+            N, Ks, T, U_T, self.M, self.h, self.alpha, self.eps, budget,
+        )
+
+    def pull_arm(self):
+        if self.budget < 1:
+            self.A_t = [-1] * self.N
+            return self.A_t
+
+        if np.random.random() <= self.alpha:
+            idx = np.random.randint(len(self.joint_actions))
+            self.A_t = list(self.joint_actions[idx])
+            return self.A_t
+
+        return super().pull_arm()
+
+    def update(self, utilities, costs):
+        for i, k in enumerate(self.A_t):
+            if k < 0:
+                continue
+            w = 1.0 if (utilities[i] + costs[i]) > 1e-9 else 0.0
+            self.cell_history[i][k].append(w)
+            if self._change_detected(i, k):
+                self._reset_cell(i, k)
+
+        super().update(utilities, costs)
+
+    def _change_detected(self, i, k):
+        hist = self.cell_history[i][k]
+        if len(hist) <= self.M:
+            return False
+        mu0 = float(np.mean(hist[:self.M]))
+        gp = gm = 0.0
+        for w in hist[self.M:]:
+            gp = max(0.0, gp + (w - mu0 - self.eps))
+            gm = max(0.0, gm + (mu0 - w - self.eps))
+            if gp > self.h or gm > self.h:
+                return True
+        return False
+
+    def _reset_cell(self, i, k):
+        self.avg_f[i][k] = 0.0
+        self.avg_c[i][k] = 0.0
+        self.N_pulls[i][k] = 0
+        self.cell_history[i][k] = []
+        self.n_resets[i][k] += 1
+        self.reset_log.append((self.t, i, k))

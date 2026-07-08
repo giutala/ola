@@ -274,3 +274,199 @@ class MultiCampaignEnv:
             pickle.dump(self, f)
         logger.info("Saved env to %s", path)
         return path
+
+
+# ---------------------------------------------------------------------------
+# Requirements 3 and 4 -- non-stationary, N campaigns, conflict graph
+# ---------------------------------------------------------------------------
+
+class NonStationaryMultiCampaignEnv:
+    """
+    N first-price auctions, shared budget, conflict graph, and a highest
+    competing bid m_t whose distribution changes over time.
+
+    Two generation modes:
+
+      'drift'  : m_t ~ Beta(alpha_t, beta_t), whose mean follows a
+                 sinusoid that completes `drift_cycles` full periods over
+                 the horizon -- the distribution moves EVERY round. Each
+                 campaign gets its own random phase so the N campaigns are
+                 not synchronised. This is the "highly" non-stationary
+                 regime (Requirement 3).
+
+      'shocks' : the horizon is cut into blocks of `block_size` rounds.
+                 Each block draws one of `n_regimes` pre-built Beta
+                 regimes uniformly at random and samples m_t i.i.d. from
+                 it for the whole block -- i.e. EXACTLY the project spec
+                 for Requirement 4 (p.18): "rounds are partitioned in
+                 intervals, in each interval the distribution ... is
+                 fixed, each interval has a different distribution."
+                 Few, long blocks = "slightly" non-stationary (R4); many,
+                 short blocks = "highly" non-stationary (an alternative to
+                 'drift' for R3).
+
+    Conflict resolution: unlike MultiCampaignEnv (which raises on a
+    violation and expects the agent to never produce one), this class
+    resolves conflicts itself by keeping the higher-utility winner --
+    Requirement 3's primal-dual agent computes COUNTERFACTUAL rewards for
+    every bid of every campaign (full feedback), so it needs the
+    environment's realised outcome to reflect the same resolution rule
+    its own update() assumes, rather than raising and refusing to proceed.
+
+    Parameters
+    ----------
+    values, budget, T, available_bids, conflict_edges, seed
+        Same as MultiCampaignEnv.
+    mode : {'drift', 'shocks'}
+    drift_cycles, drift_amplitude, base_mean, beta_concentration
+        'drift' parameters -- see _build_drift.
+    block_size, n_regimes
+        'shocks' parameters -- see _build_shocks.
+    """
+
+    SUPPORTED_MODES = ("drift", "shocks")
+
+    def __init__(self, values, budget, T, available_bids,
+                 conflict_edges=None, seed=None,
+                 mode="drift",
+                 drift_cycles=10.0, drift_amplitude=0.35, base_mean=0.5,
+                 beta_concentration=8.0,
+                 block_size=25, n_regimes=4):
+        if mode not in self.SUPPORTED_MODES:
+            raise ValueError(f"mode={mode!r} not in {self.SUPPORTED_MODES}")
+
+        self.values = np.asarray(values, dtype=float)
+        self.N = len(values)
+        self.budget = budget
+        self.T = T
+        self.rho = budget / T
+        self.conflict_edges = conflict_edges or []
+        self.seed = seed
+        self.mode = mode
+        self.drift_cycles = drift_cycles
+        self.drift_amplitude = drift_amplitude
+        self.base_mean = base_mean
+        self.beta_concentration = beta_concentration
+        self.block_size = block_size
+        self.n_regimes = n_regimes
+
+        all_bids = np.asarray(available_bids, dtype=float)
+        self.bid_sets = [all_bids[all_bids <= v] for v in self.values]
+        self.Ks = [len(bs) for bs in self.bid_sets]
+
+        self._draw(seed)
+        self.t = 0
+
+        logger.info(
+            "NonStationaryMultiCampaignEnv | N=%d T=%d B=%.1f rho=%.4f mode=%s "
+            "conflict_edges=%s",
+            self.N, T, budget, self.rho, mode, self.conflict_edges,
+        )
+
+    def _draw(self, seed):
+        rng = np.random.default_rng(seed)
+        self.shock_blocks = None
+        if self.mode == "drift":
+            self.m = self._build_drift(rng)
+        else:
+            self.m = self._build_shocks(rng)
+
+    def _build_drift(self, rng):
+        T = self.T
+        ts = np.arange(T)
+        phases = rng.uniform(0, 2 * np.pi, size=self.N)
+        s = self.beta_concentration
+        m = np.empty((self.N, T))
+        for i in range(self.N):
+            angle = 2 * np.pi * self.drift_cycles * ts / T + phases[i]
+            mean_t = np.clip(self.base_mean + self.drift_amplitude * np.sin(angle), 1e-3, 1 - 1e-3)
+            m[i] = rng.beta(mean_t * s, (1.0 - mean_t) * s)
+        return m
+
+    def _build_shocks(self, rng):
+        T = self.T
+        regime_means = rng.uniform(0.1, 0.9, size=self.n_regimes)
+        s = self.beta_concentration
+        regimes = [(mu * s, (1 - mu) * s) for mu in regime_means]
+
+        m = np.empty((self.N, T))
+        n_blocks = (T + self.block_size - 1) // self.block_size
+        self.shock_blocks = []
+        for i in range(self.N):
+            campaign_blocks = []
+            for b in range(n_blocks):
+                start = b * self.block_size
+                end = min(start + self.block_size, T)
+                a, bb = regimes[rng.integers(0, self.n_regimes)]
+                campaign_blocks.append((start, end, float(a), float(bb)))
+                m[i, start:end] = rng.beta(a, bb, size=end - start)
+            self.shock_blocks.append(campaign_blocks)
+        return m
+
+    def piecewise_win_probabilities(self):
+        """
+        Return analytical P(b >= m_i) for each shock block.
+
+        This is the distributional counterpart of `empirical_win_probabilities`:
+        it uses the Beta parameters that generated each stationary block,
+        rather than the realised sampled values m_{i,t}.
+        """
+        if self.mode != "shocks" or self.shock_blocks is None:
+            raise ValueError("piecewise_win_probabilities is only available for mode='shocks'.")
+
+        from scipy.stats import beta
+
+        n_blocks = len(self.shock_blocks[0])
+        out = []
+        for b in range(n_blocks):
+            start, end = self.shock_blocks[0][b][:2]
+            block_probs = []
+            for i in range(self.N):
+                i_start, i_end, alpha, beta_param = self.shock_blocks[i][b]
+                if (i_start, i_end) != (start, end):
+                    raise RuntimeError("Shock block boundaries are inconsistent across campaigns.")
+                block_probs.append(beta.cdf(self.bid_sets[i], alpha, beta_param))
+            out.append((start, end, block_probs))
+        return out
+
+    def round(self, bid_indices):
+        if self.t >= self.T:
+            raise RuntimeError(f"Episode finished after T={self.T} rounds.")
+
+        m_t = self.m[:, self.t]
+        bids = np.array([
+            self.bid_sets[i][bid_indices[i]] if bid_indices[i] >= 0 else -1.0
+            for i in range(self.N)
+        ])
+        won = (bids >= m_t) & (bids >= 0)
+
+        for (ei, ej) in self.conflict_edges:
+            if won[ei] and won[ej]:
+                u_i = self.values[ei] - bids[ei]
+                u_j = self.values[ej] - bids[ej]
+                if u_i >= u_j:
+                    won[ej] = False
+                else:
+                    won[ei] = False
+
+        f_t = np.where(won, self.values - bids, 0.0)
+        c_t = np.where(won, bids, 0.0)
+        self.t += 1
+        return f_t, c_t, m_t
+
+    def reset(self, seed=None):
+        self._draw(seed if seed is not None else self.seed)
+        self.t = 0
+
+    def empirical_win_probabilities(self, start=0, end=None):
+        """
+        Empirical P(b >= m_i) over rounds [start, end) -- used by the
+        piecewise / dynamic clairvoyant, since there is no single true
+        win-probability once the environment is non-stationary.
+        """
+        end = self.T if end is None else end
+        m_slice = self.m[:, start:end]
+        return [
+            (self.bid_sets[i][:, None] >= m_slice[i][None, :]).mean(axis=1)
+            for i in range(self.N)
+        ]
