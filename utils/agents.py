@@ -522,7 +522,7 @@ class PrimalDualMultiCampaignAgent:
         self.hedge_eta = float(hedge_eta) if hedge_eta is not None else float(
             np.sqrt(np.log(max(K_max, 2)) / T)
         )
-        self.ogd_eta = float(ogd_eta) if ogd_eta is not None else 2.2 / np.sqrt(T)
+        self.ogd_eta = float(ogd_eta) if ogd_eta is not None else 2 / np.sqrt(T)
         # self.ogd_eta = 0.022
 
         # --- Reward range for loss normalisation ---------------------------
