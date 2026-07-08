@@ -23,7 +23,7 @@ import numpy as np
 
 VALUES         = [0.8, 0.8, 0.9, 0.9]
 T              = 10_000
-BUDGET         = 1500.0
+BUDGET         = 1600.0
 N_TRIALS       = 20
 N_COMPETITORS  = [3, 3, 3, 3]
 CONFLICT_EDGES = [(0, 1), (2, 3)]

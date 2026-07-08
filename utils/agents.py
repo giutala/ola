@@ -522,7 +522,8 @@ class PrimalDualMultiCampaignAgent:
         self.hedge_eta = float(hedge_eta) if hedge_eta is not None else float(
             np.sqrt(np.log(max(K_max, 2)) / T)
         )
-        self.ogd_eta = float(ogd_eta) if ogd_eta is not None else 1.0 / np.sqrt(T)
+        self.ogd_eta = float(ogd_eta) if ogd_eta is not None else 2.2 / np.sqrt(T)
+        # self.ogd_eta = 0.022
 
         # --- Reward range for loss normalisation ---------------------------
         # primal reward in [-1/rho, 1]  =>  total range = 1 + 1/rho
@@ -541,6 +542,7 @@ class PrimalDualMultiCampaignAgent:
         # rho=0.05 (lmbd_max=20) starting at 1 immediately penalises costs
         # so heavily that Hedge converges to no-bid before lambda can correct.
         self.lmbd = 0.0
+        
 
         # --- State ---------------------------------------------------------
         self.A_t     = None          # sampled actions (length N)

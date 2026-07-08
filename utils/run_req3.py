@@ -169,7 +169,7 @@ def run_req3():
         results=results,
         title="Req 3 – Cumulative Pseudo-Regret: Best-of-both-worlds",
         filename="r3/req3_regret.png",
-        add_reference=True,
+        add_reference=False,
     )
     plot_budget(
         results=results, budget=BUDGET,
