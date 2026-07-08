@@ -67,6 +67,19 @@ logger = logging.getLogger(__name__)
 # Switch this single constant to compare the two regimes.
 ENV_MODE = "drift"  # "drift" or "shocks"
 
+# Dual-gradient mode of the primal-dual agent.
+#   False : NB08 fixed target rho = B/T                  (traditional gradient)
+#   True  : adaptive target rho_t = residual / remaining (budget pacing)
+# Flip this single constant to switch the whole run between the two.
+BUDGET_PACING = True
+
+# Dual (OGD) learning rate for lambda.
+#   None  : NB08 default 1/sqrt(T) (= 0.01 at T=10_000)
+#   float : tuned value. With pacing ON, ~0.035 makes lambda react fast enough
+#           to (nearly) eliminate the budget-exhaustion tail without over-
+#           suppressing spending. See the ogd_eta sweep for the trade-off.
+OGD_ETA = 0.017
+
 
 
 def run_req3():
@@ -75,8 +88,10 @@ def run_req3():
     logger.info("Requirement 3 – Best-of-both-worlds bidding")
     logger.info("=" * 60)
     logger.info(
-        "Parameters | N=%d T=%d B=%.1f rho=%.4f env_mode=%s conflict_edges=%s",
-        len(VALUES), T, BUDGET, BUDGET / T, ENV_MODE, CONFLICT_EDGES
+        "Parameters | N=%d T=%d B=%.1f rho=%.4f env_mode=%s budget_pacing=%s "
+        "ogd_eta=%s conflict_edges=%s",
+        len(VALUES), T, BUDGET, BUDGET / T, ENV_MODE, BUDGET_PACING, OGD_ETA,
+        CONFLICT_EDGES
     )
 
     # ── Factories shared across the two experiments ───────────────────────
@@ -97,6 +112,8 @@ def run_req3():
             N=N, Ks=KS, bid_sets=BID_SETS,
             T=T, budget=BUDGET, values=VALUES,
             conflict_edges=CONFLICT_EDGES,
+            budget_pacing=BUDGET_PACING,
+            ogd_eta=OGD_ETA,
         )
 
     # ─────────────────────────────────────────────────────────────────────
@@ -169,7 +186,7 @@ def run_req3():
         results=results,
         title="Req 3 – Cumulative Pseudo-Regret: Best-of-both-worlds",
         filename="r3/req3_regret.png",
-        add_reference=True,
+        add_reference=False,
     )
     plot_budget(
         results=results, budget=BUDGET,

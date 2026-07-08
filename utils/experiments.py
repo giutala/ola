@@ -265,7 +265,7 @@ def run_multi_campaign_trials(
 
 
 def plot_regret(
-    results, title="Cumulative Pseudo-Regret", filename="regret.png", add_reference=True
+    results, title="Cumulative Pseudo-Regret", filename="regret.png", add_reference=False
 ):
     """
     NB01 cell 25 pattern:

@@ -21,6 +21,7 @@ CombinatorialUCBAgent ← NB09 cell 30  (UCBMatchingAgent) adapted for
 import logging
 import pickle
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 from scipy import optimize
@@ -239,7 +240,7 @@ class CombinatorialUCBAgent:
         self.N_pulls = [np.zeros(Ks[i]) for i in range(N)]
 
         self.joint_actions = self._build_joint_actions()
-        self.A_t = None     # list of bid indices, one per campaign
+        self.A_t: Optional[list] = None     # list of bid indices, one per campaign
         self.t = 0
 
         logger.info(
@@ -377,6 +378,7 @@ class CombinatorialUCBAgent:
         NB09 cell 30 update pattern: update all arms in A_t (semi-bandit).
         utilities, costs: np.ndarray shape (N,)
         """
+        assert self.A_t is not None, "pull_arm() must be called before update()"
         for i, k in enumerate(self.A_t):
             if k < 0:
                 continue
@@ -503,8 +505,9 @@ class PrimalDualMultiCampaignAgent:
         budget: float,
         values: list,
         conflict_edges=None,
-        hedge_eta: float = None,
-        ogd_eta: float = None,
+        hedge_eta: Optional[float] = None,
+        ogd_eta: Optional[float] = None,
+        budget_pacing: bool = False,
     ):
         self.N  = N
         self.Ks = Ks
@@ -514,6 +517,12 @@ class PrimalDualMultiCampaignAgent:
         self.rho           = budget / T
         self.values        = np.asarray(values, dtype=float)
         self.conflict_edges = conflict_edges or []
+        # Budget pacing (extension beyond NB08): when True, the dual OGD target
+        # uses rho_t = remaining_budget / remaining_rounds instead of the fixed
+        # rho = B/T.  This self-corrects the spending pace so the budget lasts
+        # to T (no early-exhaustion regret tail) and unused budget is spent.
+        # When False the agent uses the exact NB08 fixed-rho gradient.
+        self.budget_pacing = budget_pacing
         # Normalised edge set: frozenset for symmetric, O(1) lookup
         self._edge_set = {frozenset(e) for e in self.conflict_edges}
 
@@ -523,7 +532,8 @@ class PrimalDualMultiCampaignAgent:
             np.sqrt(np.log(max(K_max, 2)) / T)
         )
         self.ogd_eta = float(ogd_eta) if ogd_eta is not None else 1.0 / np.sqrt(T)
-
+        #self.ogd_eta= 0.022
+        
         # --- Reward range for loss normalisation ---------------------------
         # primal reward in [-1/rho, 1]  =>  total range = 1 + 1/rho
         self._lmbd_max    = 1.0 / self.rho
@@ -543,7 +553,7 @@ class PrimalDualMultiCampaignAgent:
         self.lmbd = 0.0
 
         # --- State ---------------------------------------------------------
-        self.A_t     = None          # sampled actions (length N)
+        self.A_t: Optional[list] = None          # sampled actions (length N)
         self.x_t     = None          # distributions at current round
         self.t       = 0
         self.N_pulls = [np.zeros(Ks[i]) for i in range(N)]
@@ -556,9 +566,9 @@ class PrimalDualMultiCampaignAgent:
 
         logger.info(
             "PrimalDualMultiCampaignAgent | N=%d Ks=%s T=%d B=%.1f "
-            "rho=%.4f hedge_eta=%.5f ogd_eta=%.5f edges=%s",
+            "rho=%.4f hedge_eta=%.5f ogd_eta=%.5f budget_pacing=%s edges=%s",
             N, Ks, T, budget, self.rho,
-            self.hedge_eta, self.ogd_eta, self.conflict_edges,
+            self.hedge_eta, self.ogd_eta, self.budget_pacing, self.conflict_edges,
         )
 
     # --- Action selection --------------------------------------------------
@@ -633,6 +643,8 @@ class PrimalDualMultiCampaignAgent:
             self.t += 1
             return
 
+        assert self.A_t is not None, "pull_arm() must be called before update()"
+
         # === Step 1: Dual OGD update =======================================
         # Use the realised total cost c_t.sum() as the OGD gradient signal.
         # The conflict graph is already enforced by the environment, so
@@ -644,7 +656,17 @@ class PrimalDualMultiCampaignAgent:
         # to the no-bid arm.
         lmbd_before = self.lmbd
         realised_cost = float(c_t.sum())
-        grad = self.rho - realised_cost
+
+        # Dual target: fixed rho = B/T (NB08 cell 16/42) or, with pacing on,
+        # the adaptive rho_t = remaining_budget / remaining_rounds.  At this
+        # point self.budget is still the pre-spend residual and self.t has not
+        # been incremented yet, so (T - t) is exactly the number of rounds
+        # remaining (this one included).  No upper cap on rho_t by design.
+        if self.budget_pacing:
+            rho_t = max(self.budget, 0.0) / max(self.T - self.t, 1)
+        else:
+            rho_t = self.rho
+        grad = rho_t - realised_cost
 
         self.lmbd = float(np.clip(
             self.lmbd - self.ogd_eta * grad,
@@ -656,9 +678,10 @@ class PrimalDualMultiCampaignAgent:
         # the utility j would obtain with its sampled action a_j IF that bid
         # beats the competitors (m_t[j]).  Needed to simulate the conflict
         # graph in the counterfactual rewards used by Hedge.
+        A_t = self.A_t
         potential_u = np.zeros(self.N)
         for j in range(self.N):
-            aj = self.A_t[j]
+            aj = A_t[j]
             if aj >= 0 and self.bid_sets[j][aj] >= m_t[j]:
                 potential_u[j] = self.values[j] - self.bid_sets[j][aj]
 
