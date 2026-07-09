@@ -274,3 +274,241 @@ class MultiCampaignEnv:
             pickle.dump(self, f)
         logger.info("Saved env to %s", path)
         return path
+
+
+# ---------------------------------------------------------------------------
+# Requirement 3 – multiple campaigns, HIGHLY non-stationary environment
+# ---------------------------------------------------------------------------
+
+class AdversarialMultiCampaignEnv:
+    """
+    N first-price auctions with a shared budget, conflict graph, and a
+    HIGHLY non-stationary sequence of highest competing bids m_t.
+
+    Project spec (Requirement 3, p.15):
+      "Build a highly non-stationary environment. At a high level, it should
+       include a non-stochastic sequence of highest competing bids for each
+       campaign (e.g., sampled from a distribution that changes quickly
+       over time)."
+
+    Drop-in compatible with `MultiCampaignEnv`:
+      - same `round(bid_indices)` -> (f_t, c_t, m_t) signature
+      - same conflict-graph handling (tie-break on utility)
+      - same pre-generation pattern so trials are reproducible
+
+    The ONLY difference is how the (N, T) array `self.m` is built. Two
+    modes are provided:
+
+      'drift'  : m_t ~ Beta(alpha_t, beta_t) whose mean drifts as a high-
+                 frequency sinusoid -> the distribution changes every round.
+                 Per-campaign random phase shift desynchronises the N
+                 campaigns. The 'highly non-stationary' default.
+
+      'shocks' : the horizon is partitioned in tiny blocks of length
+                 `block_size`. In each block, m_t is i.i.d. from a regime
+                 drawn uniformly at random from a pre-built menu of
+                 `n_regimes` Beta distributions. Many regime switches per
+                 trajectory => non-stationary at all timescales.
+
+    Note on full feedback (project spec p.16): the env *returns* m_t after
+    the round, exactly like MultiCampaignEnv. Any bidding strategy can
+    therefore reconstruct counterfactual rewards (v_i - b)*1[b >= m_t] and
+    costs b*1[b >= m_t] for every b in the bid set -- this is the full-
+    feedback signal the primal-dual agent of Req 3 needs.
+
+    Parameters
+    ----------
+    values : list[float]
+        Per-campaign values v_i.
+    budget : float
+        Total shared budget B.
+    T : int
+        Time horizon.
+    available_bids : np.ndarray
+        Discrete bid set shared across campaigns (before per-campaign
+        filtering by v_i).
+    conflict_edges : list[tuple[int,int]], optional
+    seed : int, optional
+    mode : {'drift', 'shocks'}
+    drift_cycles : float
+        For 'drift'. Number of full sinusoid periods in [0, T]. Higher =
+        faster non-stationarity. Default 10 (period ~ T/10).
+    drift_amplitude : float
+        For 'drift'. Half-range of the mean's sinusoid in (0, 0.5). The
+        Beta mean oscillates in [base_mean - amp, base_mean + amp].
+    base_mean : float
+        For 'drift'. Center of the Beta-mean sinusoid. Default 0.5.
+    beta_concentration : float
+        Sum alpha+beta of the Beta. Higher => more peaked m_t around its
+        current mean. Shared across regimes in 'shocks' mode.
+    block_size : int
+        For 'shocks'. Length of each piecewise-constant regime.
+    n_regimes : int
+        For 'shocks'. Size of the menu of (alpha, beta) regimes.
+    """
+
+    SUPPORTED_MODES = ("drift", "shocks")
+
+    def __init__(self, values, budget, T, available_bids,
+                 conflict_edges=None, seed=None,
+                 mode="shocks",
+                 drift_cycles=10.0,
+                 drift_amplitude=0.35,
+                 base_mean=0.5,
+                 beta_concentration=8.0,
+                 block_size=25,
+                 n_regimes=4):
+
+        if mode not in self.SUPPORTED_MODES:
+            raise ValueError(
+                f"mode={mode!r} not in {self.SUPPORTED_MODES}"
+            )
+
+        self.values = np.asarray(values, dtype=float)
+        self.N = len(values)
+        self.budget = budget
+        self.T = T
+        self.rho = budget / T
+        self.conflict_edges = conflict_edges or []
+        self.seed = seed
+        self.mode = mode
+        self.drift_cycles = drift_cycles
+        self.drift_amplitude = drift_amplitude
+        self.base_mean = base_mean
+        self.beta_concentration = beta_concentration
+        self.block_size = block_size
+        self.n_regimes = n_regimes
+
+        # Per-campaign bid sets: bids <= v_i  (NB07 cell 43, same as Req 2)
+        all_bids = np.asarray(available_bids, dtype=float)
+        self.bid_sets = [all_bids[all_bids <= v] for v in self.values]
+        self.Ks = [len(bs) for bs in self.bid_sets]
+
+        # Build the (N, T) sequence of m_t
+        rng = np.random.default_rng(seed)
+        if mode == "drift":
+            self.m = self._build_drift(rng)
+        else:  # 'shocks'
+            self.m = self._build_shocks(rng)
+
+        self.t = 0
+
+        logger.info(
+            "AdversarialMultiCampaignEnv | N=%d T=%d B=%.1f rho=%.4f "
+            "mode=%s conflict_edges=%s",
+            self.N, T, budget, self.rho, mode, self.conflict_edges,
+        )
+
+    # ---- m_t generators --------------------------------------------------
+
+    def _build_drift(self, rng):
+        """
+        Per-round Beta(alpha_t, beta_t) sampling, with mean drifting as a
+        high-frequency sinusoid. Each campaign gets its own phase shift so
+        the N campaigns are NOT synchronised (more realistic / harder).
+        """
+        T = self.T
+        ts = np.arange(T)
+        phases = rng.uniform(0, 2 * np.pi, size=self.N)
+        m = np.empty((self.N, T))
+        s = self.beta_concentration  # alpha + beta
+        for i in range(self.N):
+            angle = 2 * np.pi * self.drift_cycles * ts / T + phases[i]
+            mean_t = self.base_mean + self.drift_amplitude * np.sin(angle)
+            mean_t = np.clip(mean_t, 1e-3, 1 - 1e-3)
+            alpha_t = mean_t * s
+            beta_t = (1.0 - mean_t) * s
+            m[i] = rng.beta(alpha_t, beta_t)
+        return m
+
+    def _build_shocks(self, rng):
+        """
+        Piecewise-stationary in tiny blocks. n_regimes random (alpha, beta)
+        pairs are pre-drawn at init; each block picks one uniformly at
+        random and samples i.i.d. from it.
+        """
+        T = self.T
+        regime_means = rng.uniform(0.1, 0.9, size=self.n_regimes)
+        s = self.beta_concentration
+        regimes = [(mu * s, (1 - mu) * s) for mu in regime_means]
+
+        m = np.empty((self.N, T))
+        n_blocks = (T + self.block_size - 1) // self.block_size
+        for i in range(self.N):
+            for b in range(n_blocks):
+                start = b * self.block_size
+                end = min(start + self.block_size, T)
+                a, bb = regimes[rng.integers(0, self.n_regimes)]
+                m[i, start:end] = rng.beta(a, bb, size=end - start)
+        return m
+
+    # ---- Same interaction protocol as MultiCampaignEnv -------------------
+
+    def round(self, bid_indices):
+        """
+        Play one round across all campaigns.
+
+        Parameters
+        ----------
+        bid_indices : list[int]   length N
+            bid_indices[i] = index into self.bid_sets[i], or -1 to abstain.
+
+        Returns
+        -------
+        f_t : np.ndarray (N,)    per-campaign utility (v_i - b_i) * 1[won]
+        c_t : np.ndarray (N,)    per-campaign cost     b_i * 1[won]
+        m_t : np.ndarray (N,)    max competing bids (full-feedback signal)
+        """
+        if self.t >= self.T:
+            raise RuntimeError(f"Episode finished after T={self.T} rounds.")
+
+        m_t = self.m[:, self.t]
+        bids = np.array([
+            self.bid_sets[i][bid_indices[i]] if bid_indices[i] >= 0 else -1.0
+            for i in range(self.N)
+        ])
+        won = (bids >= m_t) & (bids >= 0)
+
+        # Conflict graph: keep only the higher-utility winner per edge
+        for (ei, ej) in self.conflict_edges:
+            if won[ei] and won[ej]:
+                u_i = self.values[ei] - bids[ei]
+                u_j = self.values[ej] - bids[ej]
+                if u_i >= u_j:
+                    won[ej] = False
+                else:
+                    won[ei] = False
+
+        f_t = np.where(won, self.values - bids, 0.0)
+        c_t = np.where(won, bids, 0.0)
+        self.t += 1
+        return f_t, c_t, m_t
+
+    def reset(self, seed=None):
+        """Re-draw the m sequence and reset the round counter."""
+        s = seed if seed is not None else self.seed
+        rng = np.random.default_rng(s)
+        if self.mode == "drift":
+            self.m = self._build_drift(rng)
+        else:  # 'shocks'
+            self.m = self._build_shocks(rng)
+        self.t = 0
+
+    def empirical_win_probabilities(self):
+        """
+        For non-stationary envs there is no SINGLE win-probability per bid.
+        Returns the *empirical* P(b >= m_i) over the full horizon -- this
+        is what a 'best fixed bid in hindsight' baseline optimises on.
+        Returns list[np.ndarray], one per campaign.
+        """
+        return [
+            (self.bid_sets[i][:, None] >= self.m[i][None, :]).mean(axis=1)
+            for i in range(self.N)
+        ]
+
+    def save(self, name="adversarial_multi_campaign_env"):
+        path = DATA_DIR / f"{name}.pkl"
+        with open(path, "wb") as f:
+            pickle.dump(self, f)
+        logger.info("Saved env to %s", path)
+        return path
