@@ -68,6 +68,8 @@ ola/
 
   The ranking (CUSUM < Sliding-Window < Primal-Dual) is identical under all three benchmarks. Primal-Dual's gap is driven by budget under-utilisation (74.6% spent vs ~99.8% for the other two) — `budget_pacing` fixes this cleanly at short horizons but only marginally at $T=10000$, an unresolved and explicitly documented "unexpected result". See `deliverables/req4_slightly_nonstationary.ipynb` for the full discussion.
 
+- **Additional investigation (beyond the spec)**: is Primal-Dual's under-spending fixable by retuning `hedge_eta`/`ogd_eta` specifically for `shocks`? `utils/run_req4_pd_shocks_tuned.py` runs a dedicated hyperparameter search and a 4-agent comparison (included as a clearly-labelled extra section at the end of `req4_slightly_nonstationary.ipynb`). Short answer: retuning closes most of the budget gap (74.6% → 93.1%) but barely moves the regret (1777.40 → 1751.38, +1.5%) — it *relocates* the pacing failure rather than fixing it, evidence that the gap is structural (Hedge has no forgetting mechanism matched to discrete regime changes, unlike Sliding-Window/CUSUM), not a missed tuning step. Full write-up, tuning log, and theoretical argument (static vs. dynamic regret) in **`docs/Requirement4_Exam_Report.pdf`**.
+
 ---
 
 ## Running
@@ -90,6 +92,10 @@ run_req3()
 # req4_slightly_nonstationary.ipynb
 from utils.run_req4 import run_req4
 run_req4()
+
+# Optional, beyond the spec (~30-40 min, see README section above):
+# from utils.run_req4_pd_shocks_tuned import run_req4_pd_comparison
+# run_req4_pd_comparison()
 ```
 
 Plots are saved by requirement in `outputs/req1/`, `outputs/req2/`, `outputs/r3/`, `outputs/r4/`.
