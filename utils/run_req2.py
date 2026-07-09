@@ -3,12 +3,12 @@ run_req2.py
 -----------
 Requirement 2: multiple campaigns, stochastic environment.
 
-Algorithm: CombinatorialUCBAgent — extends UCBLikeAgent (NB07 cell 40)
-to N campaigns with a shared budget LP oracle and conflict graph,
-mirroring the UCBMatchingAgent structure from NB09 cell 30.
+Algorithm: CombinatorialUCBAgent — extends the single-campaign UCB-like
+approach to N campaigns with a shared budget LP oracle and a conflict graph.
 
-T=10_000 matches R1 for a valid cross-requirement regret comparison.
-B scaled proportionally so rho=0.16 is unchanged.
+The environment, budget, and bid parameters are identical to Requirements 3
+and 4 (imported from req3_config) so regret curves remain directly comparable
+across requirements.
 
 Call from the notebook: run_req2()
 """
@@ -29,21 +29,11 @@ from utils.experiments import (
     run_multi_campaign_trials,
     OUTPUTS_DIR,
 )
+from utils.req3_config import (
+    VALUES, T, BUDGET, N_TRIALS, N_COMPETITORS, CONFLICT_EDGES, AVAILABLE_BIDS,
+)
 
 logger = logging.getLogger(__name__)
-
-# ── Parameters ────────────────────────────────────────────────────────────
-VALUES = [0.8, 0.6, 0.9, 0.7]
-T = 10_000  # matches R1 for valid comparison
-BUDGET = 1_600.0  # rho = 1600/10000 = 0.16 (unchanged from before)
-N_TRIALS = 20
-N_COMPETITORS = [3, 3, 3, 3]
-CONFLICT_EDGES = [(0, 1), (2, 3)]
-AVAILABLE_BIDS = np.linspace(0, 1, 11)
-
-# Exploration initially favors under-sampled campaign/bid pairs through UCB
-# optimism. We annotate the approximate transition empirically.
-N_ARMS_TOTAL = 4 * 11  # upper bound; actual Ks may differ per campaign
 
 
 def run_req2():
@@ -138,11 +128,9 @@ def run_req2():
     ts = np.arange(1, T + 1)
 
     second_deriv = np.diff(mean_regret, n=2)
-    # Smooth before finding peak to avoid noise
     smooth_width = max(1, T // 200)
     kernel = np.ones(smooth_width) / smooth_width
     smoothed_d2 = np.convolve(second_deriv, kernel, mode="same")
-    # Look only in first third of run where transition should occur
     search_end = T // 3
     kink_t = int(np.argmax(smoothed_d2[:search_end])) + 2  # +2 for diff offset
 
@@ -157,7 +145,6 @@ def run_req2():
         label="±stderr",
     )
 
-    # Annotate the transition
     ax.axvline(kink_t, color="gray", linestyle=":", linewidth=1.2)
     ax.annotate(
         f"Exploration ends\n$t\\approx{kink_t}$",

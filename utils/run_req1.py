@@ -3,13 +3,19 @@ run_req1.py
 -----------
 Requirement 1: single campaign, stochastic environment.
 
-Runs two budget scenarios to demonstrate the budget-awareness of UCBlike:
-  - Generous budget: B=1600, rho=0.16 → constraint non-binding for the
-                                         unconstrained best bid b=0.6, whose
-                                         expected cost is 0.1296.
-  - Tight budget:    B=400,  rho=0.04 → constraint binding; UCB1 is
-                                         budget-unaware, while UCB-like handles
-                                         the budget through its LP constraint.
+Compares UCB1 (budget-unaware) against UCB-like (budget-aware LP) under
+two budget scenarios designed to isolate the effect of the budget constraint:
+
+  - Generous (B=1600, rho=0.16): constraint non-binding for the unconstrained
+    optimal bid b=0.6 (expected cost 0.1296), so both agents should converge
+    to the same bid.
+  - Tight (B=400, rho=0.04): constraint binding; UCB1 overspends while
+    UCB-like respects the budget through its LP oracle.
+
+Note: this file uses a coarser bid grid (linspace(0,1,6)) compared to
+Requirements 2–4 (linspace(0,1,11)) so that the UCB gap-dependent behavior
+is clearly visible at T=10000. This is a deliberate, labelled choice within
+Requirement 1, not a change to the shared problem setting.
 
 Call from the notebook: run_req1()
 """

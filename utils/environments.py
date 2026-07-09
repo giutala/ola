@@ -1,17 +1,14 @@
 """
 environments.py
 ---------------
-Auction environments for Requirements 1 and 2.
+Auction environments for Requirements 1 through 4.
 
-Generative model follows NB07 exactly:
-  - n_competitors bids are drawn i.i.d. from Uniform[0,1] each round
-  - m_t = max of those bids  (NB07 cell 14)
-  - the win-probability for bid b is therefore Beta(n_competitors, 1).cdf(b)
-    (NB07 cell 22: "the maximum among k uniformly distributed r.v.s is a
-     beta r.v. with alpha=k and beta=1")
+Generative model: n_competitors bids are drawn i.i.d. from Uniform[0,1] each
+round; m_t = max of those bids. The win probability for bid b is therefore
+P(b >= m_t) = Beta(n_competitors, 1).cdf(b), i.e. b^k for k competitors.
 
-Both environments pre-generate ALL competitor bids at __init__ time,
-following the same pattern as BernoulliEnvironment in NB01 cell 4.
+All environments pre-generate the full competitor-bid array at construction
+time so that trials are reproducible and the round() method is O(1).
 """
 
 import logging
@@ -35,12 +32,9 @@ class SingleCampaignEnv:
     """
     Stochastic first-price auction for one campaign.
 
-    Follows the setup in NB07 cells 14 and 43:
-      - n_competitors competitors each bid ~ Uniform[0, 1] i.i.d.
-      - m_t = max of their bids
-      - learner wins if bid >= m_t, pays bid, earns (value - bid)
-
-    All competitor bids are pre-generated at init (NB01 cell 4 pattern).
+    Each round t, n_competitors competitors bid i.i.d. from Uniform[0,1].
+    The learner wins if its bid >= m_t (max competing bid) and earns
+    (value - bid); cost is bid * 1[won].
 
     Parameters
     ----------
@@ -51,15 +45,21 @@ class SingleCampaignEnv:
     T : int
         Time horizon.
     available_bids : np.ndarray
-        Discrete bid set. Bids > value are excluded here, following
-        NB07 cell 43: good_bids = available_bids[available_bids <= my_valuation]
+        Discrete bid set. Bids strictly above value are excluded.
     n_competitors : int
-        Number of competitors (k in Beta(k,1)). Default 3 matches NB07.
+        Number of competitors k; win probability = Beta(k, 1).cdf(bid).
     seed : int, optional
     """
 
-    def __init__(self, value, budget, T, available_bids,
-                 n_competitors=3, seed=None):
+    def __init__(
+        self,
+        value: float,
+        budget: float,
+        T: int,
+        available_bids: np.ndarray,
+        n_competitors: int = 3,
+        seed: int | None = None,
+    ) -> None:
         self.value = value
         self.budget = budget
         self.T = T
@@ -72,9 +72,7 @@ class SingleCampaignEnv:
         self.seed = seed
 
         rng = np.random.default_rng(seed)
-        # NB07 cell 14: other_bids ~ Uniform[0,1], shape (n_competitors, T)
         self.other_bids = rng.uniform(0, 1, size=(n_competitors, T))
-        # m_t = max competing bid each round
         self.m = self.other_bids.max(axis=0)
         self.t = 0
 
@@ -83,7 +81,7 @@ class SingleCampaignEnv:
             value, budget, T, self.K, self.rho, n_competitors,
         )
 
-    def round(self, bid_index):
+    def round(self, bid_index: int) -> tuple[float, float, float]:
         """
         Play one round.
 
@@ -94,17 +92,17 @@ class SingleCampaignEnv:
 
         Returns
         -------
-        f_t : float   (value - bid) * I[won]   — NB07 cell 43
-        c_t : float   bid * I[won]              — NB07 cell 43
+        f_t : float   (value - bid) * 1[won]
+        c_t : float   bid * 1[won]
         m_t : float   max competing bid revealed after the round
         """
         if self.t >= self.T:
             raise RuntimeError(f"Episode finished after T={self.T} rounds.")
         bid = self.available_bids[bid_index]
         m_t = self.m[self.t]
-        my_win = int(bid >= m_t)                   # NB07 cell 43
-        f_t = (self.value - bid) * my_win          # NB07 cell 43
-        c_t = bid * my_win                         # NB07 cell 43
+        my_win = int(bid >= m_t)
+        f_t = (self.value - bid) * my_win
+        c_t = bid * my_win
         self.t += 1
         return f_t, c_t, m_t
 
@@ -116,11 +114,8 @@ class SingleCampaignEnv:
         self.m = self.other_bids.max(axis=0)
         self.t = 0
 
-    def win_probabilities(self):
-        """
-        Exact P(bid >= m) per bid via Beta(k,1) CDF.
-        NB07 cell 22: stats.beta.cdf(available_bids, n_advertisers, 1)
-        """
+    def win_probabilities(self) -> np.ndarray:
+        """Exact P(bid >= m) per bid: Beta(n_competitors, 1).cdf(bid)."""
         return stats.beta.cdf(self.available_bids, self.n_competitors, 1)
 
     def save(self, name="single_campaign_env"):
@@ -137,16 +132,12 @@ class SingleCampaignEnv:
 
 class MultiCampaignEnv:
     """
-    N independent first-price auctions with a shared budget and a conflict
-    graph.
+    N independent first-price auctions with a shared budget and a conflict graph.
 
-    Each campaign i has its own set of competitors bidding Uniform[0,1].
-    All competitor bids are pre-generated at init.
-
-    Conflict graph
-    --------------
-    Two campaigns connected by an edge cannot both be bid on in the same round
-    (project spec p.7). Invalid bid vectors are rejected.
+    Each campaign i has its own competitors bidding Uniform[0,1]. Competitor
+    bids are pre-generated at construction. Campaigns connected by a conflict
+    edge cannot both receive bids in the same round; invalid bid vectors raise
+    ValueError.
 
     Parameters
     ----------
@@ -157,15 +148,23 @@ class MultiCampaignEnv:
     T : int
         Time horizon.
     available_bids : np.ndarray
-        Discrete bid set shared across campaigns (before per-campaign filtering).
+        Discrete bid set shared across campaigns (bids > v_i excluded per campaign).
     n_competitors : list[int], optional
-        Competitors per campaign.  Default 3 each (NB07 default).
+        Competitors per campaign. Default: 3 each.
     conflict_edges : list[tuple[int, int]], optional
     seed : int, optional
     """
 
-    def __init__(self, values, budget, T, available_bids,
-                 n_competitors=None, conflict_edges=None, seed=None):
+    def __init__(
+        self,
+        values: list[float],
+        budget: float,
+        T: int,
+        available_bids: np.ndarray,
+        n_competitors: list[int] | None = None,
+        conflict_edges: list[tuple[int, int]] | None = None,
+        seed: int | None = None,
+    ) -> None:
         self.values = np.asarray(values)
         self.N = len(values)
         self.budget = budget
@@ -177,13 +176,11 @@ class MultiCampaignEnv:
         n_comp = n_competitors if n_competitors is not None else [3] * self.N
         self.n_competitors = n_comp
 
-        # Per-campaign bid sets: bids <= v_i  (NB07 cell 43)
         all_bids = np.asarray(available_bids)
         self.bid_sets = [all_bids[all_bids <= v] for v in self.values]
         self.Ks = [len(bs) for bs in self.bid_sets]
 
         rng = np.random.default_rng(seed)
-        # Shape: list of arrays (n_comp_i, T)
         self.other_bids = [
             rng.uniform(0, 1, size=(n_comp[i], T))
             for i in range(self.N)
@@ -258,10 +255,11 @@ class MultiCampaignEnv:
         self.m = np.vstack([ob.max(axis=0) for ob in self.other_bids])
         self.t = 0
 
-    def win_probabilities(self):
+    def win_probabilities(self) -> list[np.ndarray]:
         """
-        True P(b >= m_i) per campaign and bid.
-        Returns list of np.ndarray, one per campaign (NB07 cell 22).
+        Exact P(b >= m_i) per campaign and bid via Beta(k_i, 1).cdf.
+
+        Returns list of np.ndarray, one array per campaign.
         """
         return [
             stats.beta.cdf(self.bid_sets[i], self.n_competitors[i], 1)
@@ -283,38 +281,24 @@ class MultiCampaignEnv:
 class AdversarialMultiCampaignEnv:
     """
     N first-price auctions with a shared budget, conflict graph, and a
-    HIGHLY non-stationary sequence of highest competing bids m_t.
+    non-stationary sequence of highest competing bids m_t.
 
-    Project spec (Requirement 3, p.15):
-      "Build a highly non-stationary environment. At a high level, it should
-       include a non-stochastic sequence of highest competing bids for each
-       campaign (e.g., sampled from a distribution that changes quickly
-       over time)."
+    Drop-in compatible with MultiCampaignEnv (same round() signature and
+    conflict-graph handling). The only difference is how the (N, T) array
+    self.m is built. Two modes are supported:
 
-    Drop-in compatible with `MultiCampaignEnv`:
-      - same `round(bid_indices)` -> (f_t, c_t, m_t) signature
-      - same conflict-graph handling (tie-break on utility)
-      - same pre-generation pattern so trials are reproducible
+      'drift'  : m_t ~ Beta(alpha_t, beta_t) whose mean follows a high-
+                 frequency sinusoid with campaign-specific random phase
+                 shifts. The distribution changes every round.
 
-    The ONLY difference is how the (N, T) array `self.m` is built. Two
-    modes are provided:
+      'shocks' : the horizon is partitioned into blocks of length block_size.
+                 Each block draws m_t i.i.d. from one of n_regimes Beta
+                 distributions chosen uniformly at random. Suitable for
+                 Requirement 4's piecewise-stationary setting.
 
-      'drift'  : m_t ~ Beta(alpha_t, beta_t) whose mean drifts as a high-
-                 frequency sinusoid -> the distribution changes every round.
-                 Per-campaign random phase shift desynchronises the N
-                 campaigns. The 'highly non-stationary' default.
-
-      'shocks' : the horizon is partitioned in tiny blocks of length
-                 `block_size`. In each block, m_t is i.i.d. from a regime
-                 drawn uniformly at random from a pre-built menu of
-                 `n_regimes` Beta distributions. Many regime switches per
-                 trajectory => non-stationary at all timescales.
-
-    Note on full feedback (project spec p.16): the env *returns* m_t after
-    the round, exactly like MultiCampaignEnv. Any bidding strategy can
-    therefore reconstruct counterfactual rewards (v_i - b)*1[b >= m_t] and
-    costs b*1[b >= m_t] for every b in the bid set -- this is the full-
-    feedback signal the primal-dual agent of Req 3 needs.
+    Full feedback: round() returns m_t after each round, enabling any agent
+    to reconstruct counterfactual rewards (v_i - b)*1[b >= m_t] and costs
+    b*1[b >= m_t] for all bids in the bid set.
 
     Parameters
     ----------
@@ -325,39 +309,42 @@ class AdversarialMultiCampaignEnv:
     T : int
         Time horizon.
     available_bids : np.ndarray
-        Discrete bid set shared across campaigns (before per-campaign
-        filtering by v_i).
-    conflict_edges : list[tuple[int,int]], optional
+        Discrete bid set shared across campaigns (bids > v_i excluded per campaign).
+    conflict_edges : list[tuple[int, int]], optional
     seed : int, optional
     mode : {'drift', 'shocks'}
     drift_cycles : float
-        For 'drift'. Number of full sinusoid periods in [0, T]. Higher =
-        faster non-stationarity. Default 10 (period ~ T/10).
+        For 'drift'. Number of full sinusoid periods in [0, T].
     drift_amplitude : float
-        For 'drift'. Half-range of the mean's sinusoid in (0, 0.5). The
-        Beta mean oscillates in [base_mean - amp, base_mean + amp].
+        For 'drift'. Half-amplitude of the sinusoidal mean (in (0, 0.5)).
     base_mean : float
-        For 'drift'. Center of the Beta-mean sinusoid. Default 0.5.
+        For 'drift'. Centre of the sinusoidal mean. Default 0.5.
     beta_concentration : float
-        Sum alpha+beta of the Beta. Higher => more peaked m_t around its
-        current mean. Shared across regimes in 'shocks' mode.
+        Beta concentration parameter (alpha + beta). Shared across modes.
     block_size : int
-        For 'shocks'. Length of each piecewise-constant regime.
+        For 'shocks'. Number of rounds per piecewise-constant block.
     n_regimes : int
-        For 'shocks'. Size of the menu of (alpha, beta) regimes.
+        For 'shocks'. Number of distinct Beta regimes to sample from.
     """
 
     SUPPORTED_MODES = ("drift", "shocks")
 
-    def __init__(self, values, budget, T, available_bids,
-                 conflict_edges=None, seed=None,
-                 mode="shocks",
-                 drift_cycles=10.0,
-                 drift_amplitude=0.35,
-                 base_mean=0.5,
-                 beta_concentration=8.0,
-                 block_size=25,
-                 n_regimes=4):
+    def __init__(
+        self,
+        values: list[float],
+        budget: float,
+        T: int,
+        available_bids: np.ndarray,
+        conflict_edges: list[tuple[int, int]] | None = None,
+        seed: int | None = None,
+        mode: str = "shocks",
+        drift_cycles: float = 10.0,
+        drift_amplitude: float = 0.35,
+        base_mean: float = 0.5,
+        beta_concentration: float = 8.0,
+        block_size: int = 25,
+        n_regimes: int = 4,
+    ) -> None:
 
         if mode not in self.SUPPORTED_MODES:
             raise ValueError(
@@ -379,7 +366,6 @@ class AdversarialMultiCampaignEnv:
         self.block_size = block_size
         self.n_regimes = n_regimes
 
-        # Per-campaign bid sets: bids <= v_i  (NB07 cell 43, same as Req 2)
         all_bids = np.asarray(available_bids, dtype=float)
         self.bid_sets = [all_bids[all_bids <= v] for v in self.values]
         self.Ks = [len(bs) for bs in self.bid_sets]
@@ -402,11 +388,11 @@ class AdversarialMultiCampaignEnv:
 
     # ---- m_t generators --------------------------------------------------
 
-    def _build_drift(self, rng):
+    def _build_drift(self, rng: np.random.Generator) -> np.ndarray:
         """
-        Per-round Beta(alpha_t, beta_t) sampling, with mean drifting as a
-        high-frequency sinusoid. Each campaign gets its own phase shift so
-        the N campaigns are NOT synchronised (more realistic / harder).
+        Sample m_t from Beta(alpha_t, beta_t) per round, where the mean follows
+        a high-frequency sinusoid with a campaign-specific random phase offset
+        so the N campaigns are not synchronised.
         """
         T = self.T
         ts = np.arange(T)
@@ -422,18 +408,13 @@ class AdversarialMultiCampaignEnv:
             m[i] = rng.beta(alpha_t, beta_t)
         return m
 
-    def _build_shocks(self, rng):
+    def _build_shocks(self, rng: np.random.Generator) -> np.ndarray:
         """
-        Piecewise-stationary in tiny blocks. n_regimes random (alpha, beta)
-        pairs are pre-drawn at init; each block picks one uniformly at
-        random and samples i.i.d. from it.
-
-        Also records the exact (start, end, alpha, beta) selected for every
-        (campaign, block) in self.shock_blocks -- no extra random draw, just
-        keeping what was already sampled -- so a distributional (piecewise
-        expected) clairvoyant can be computed analytically later without
-        needing to re-estimate the block distributions empirically. See
-        piecewise_win_probabilities().
+        Piecewise-stationary in blocks. n_regimes random Beta(alpha, beta)
+        distributions are pre-drawn; each block i.i.d. samples from one chosen
+        uniformly at random. Records (start, end, alpha, beta) per (campaign, block)
+        in self.shock_blocks so the piecewise expected clairvoyant can be computed
+        analytically from the true parameters rather than empirical estimates.
         """
         T = self.T
         regime_means = rng.uniform(0.1, 0.9, size=self.n_regimes)
@@ -507,46 +488,40 @@ class AdversarialMultiCampaignEnv:
             self.m = self._build_shocks(rng)
         self.t = 0
 
-    def empirical_win_probabilities(self):
+    def empirical_win_probabilities(self) -> list[np.ndarray]:
         """
-        For non-stationary envs there is no SINGLE win-probability per bid.
-        Returns the *empirical* P(b >= m_i) over the full horizon -- this
-        is what a 'best fixed bid in hindsight' baseline optimises on.
-        Returns list[np.ndarray], one per campaign.
+        Empirical P(b >= m_i) over the full realised horizon per campaign.
+
+        In a non-stationary environment there is no single true win probability;
+        this time-average is what the best fixed bid distribution in hindsight
+        (OPT^A) optimises against.
+
+        Returns list[np.ndarray], one array per campaign.
         """
         return [
             (self.bid_sets[i][:, None] >= self.m[i][None, :]).mean(axis=1)
             for i in range(self.N)
         ]
 
-    def piecewise_win_probabilities(self):
+    def piecewise_win_probabilities(self) -> list[tuple[int, int, list[np.ndarray]]]:
         """
         Analytical P(b >= m_i) per stationary block, for mode='shocks' only.
 
-        Unlike empirical_win_probabilities() (one estimate over the WHOLE
-        horizon -- appropriate for OPT^A, the best single fixed policy) or
-        the realised m_t themselves (used by the fully dynamic clairvoyant,
-        which additionally knows the specific round-by-round draw), this
-        uses the exact Beta(alpha, beta) parameters that generated each
-        block (recorded in self.shock_blocks) to compute the TRUE win
-        probability of every bid within that block analytically -- no
-        sampling noise, and no foreknowledge of the realised m_t.
+        Uses the exact Beta(alpha, beta) parameters that generated each block
+        (recorded in self.shock_blocks) to compute the true win probability
+        analytically, without sampling noise or per-round foreknowledge of m_t.
 
-        This is the distributional ingredient needed for the piecewise
-        expected clairvoyant (see experiments.py's
-        compute_piecewise_expected_clairvoyant): an oracle that knows the
-        interval boundaries and each interval's true distribution, but not
-        the realised competing bids -- the natural benchmark for a
-        piecewise-stationary environment, and the one Sliding-Window /
-        CUSUM Combinatorial-UCB (Requirement 4) actually have tracking
-        guarantees against in the bandit literature (e.g. Garivier &
-        Moulines 2011 for SW-UCB), unlike OPT^A.
+        This is the distributional input to compute_piecewise_expected_clairvoyant:
+        an oracle that knows block boundaries and true block distributions, but
+        not the realised competing bids — the natural benchmark for a piecewise-
+        stationary environment against which SW-UCB and CUSUM-UCB have literature
+        tracking guarantees (e.g. Garivier & Moulines 2011).
 
         Returns
         -------
         list[tuple[int, int, list[np.ndarray]]]
             One (start, end, win_prob_list) tuple per block, where
-            win_prob_list[i] is P(b >= m_i) for every b in self.bid_sets[i].
+            win_prob_list[i] gives P(b >= m_i) for every b in self.bid_sets[i].
         """
         if self.mode != "shocks" or self.shock_blocks is None:
             raise ValueError("piecewise_win_probabilities is only available for mode='shocks'.")

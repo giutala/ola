@@ -3,44 +3,22 @@ run_req4.py
 -----------
 Requirement 4: slightly non-stationary environment, multiple campaigns.
 
-DEFINITIVE version, built on the reconciled team codebase:
-  - Requirements 1/2 (utils/agents.py's CombinatorialUCBAgent, this file's
-    only dependency from that half of the code) are taken from `main` --
-    the team's agreed definitive R1/R2 branch. main's CombinatorialUCBAgent
-    already has the empirical-mean-cost budget LP fix (no premature greedy
-    fallback), so SlidingWindowCombinatorialUCBAgent and
-    CUSUMCombinatorialUCBAgent below subclass it DIRECTLY -- no workaround
-    class needed (see agents.py's "Requirement 4" section docstring for
-    why this matters: the `giovanni` branch's own copy of
-    CombinatorialUCBAgent had regressed back to the original buggy
-    fallback, which is why an earlier draft of this file needed a
-    self-contained substitute).
-  - Requirement 3 (AdversarialMultiCampaignEnv, PrimalDualMultiCampaignAgent,
-    req3_config.py, run_req3.py) is taken from `giovanni`'s latest commit
-    (277b883) -- the team's agreed definitive R3 branch. This includes
-    PrimalDualMultiCampaignAgent's `budget_pacing` feature.
-  - The benchmark methodology is the one argued for in
-    docs/Req4_Linear_Regret_Baseline.tex and
-    docs/Req4_Baseline_Code_Fix_Practical.tex (a third team proposal,
-    `rec4-partial`): the dynamic/"prophet" clairvoyant that knows every
-    realised m_t in advance inflates regret with a term that is LINEAR in
-    T regardless of learner quality (Jensen-gap "information premium"),
-    so it is kept only as an upper-bound reference, not the primary
-    diagnostic. The PRIMARY benchmark here is the piecewise expected
-    clairvoyant (compute_piecewise_expected_clairvoyant in experiments.py):
-    an oracle that knows the interval boundaries and each interval's TRUE
-    distribution but not the realised bids -- the natural benchmark for a
-    piecewise-stationary environment, and the one Sliding-Window/CUSUM
-    actually have literature tracking guarantees against. OPT^A (best
-    single fixed distribution for the whole horizon) is also reported, for
-    continuity with Requirement 3's own methodology (run_req3.py) and
-    because it is Primal-Dual's own provable-regret benchmark.
+Environment: AdversarialMultiCampaignEnv(mode='shocks') — the same N, VALUES,
+BUDGET, T, and bid grid as Requirements 2 and 3, reparameterised for 5 long
+piecewise-stationary blocks (block_size=2000).
 
-Three bidding strategies on the SAME environment (project spec, "Compare"):
-  1. SlidingWindowCombinatorialUCBAgent   (Requirement 2, fixed + Practical/10 SW-UCB)
-  2. CUSUMCombinatorialUCBAgent            (Requirement 2, fixed + Practical/10 CUSUM-UCB)
-  3. PrimalDualMultiCampaignAgent          (Requirement 3, reused unchanged,
-                                             budget_pacing=True to match run_req3.py)
+Three strategies compared on the same environment:
+  1. SlidingWindowCombinatorialUCBAgent  — window W=2000 (one block length)
+  2. CUSUMCombinatorialUCBAgent          — CUSUM detector on the win indicator
+  3. PrimalDualMultiCampaignAgent        — Requirement 3 agent, budget_pacing=True
+
+Three benchmarks reported:
+  - PRIMARY   : piecewise expected clairvoyant — knows block boundaries and true
+                block distributions, not individual m_t realisations. The natural
+                target for SW-UCB and CUSUM-UCB (Garivier & Moulines 2011).
+  - SECONDARY : OPT^A — best fixed distribution in hindsight (continuity with Req 3).
+  - REFERENCE : dynamic/prophet — knows every realised m_t; inflates regret by a
+                term linear in T via Jensen's inequality (see compute_clairvoyant_dynamic_multi).
 
 Call from the notebook / CLI: run_req4()
 """
@@ -65,27 +43,18 @@ from utils.req4_config import (
 
 logger = logging.getLogger(__name__)
 
-# Cache key for the dynamic/prophet reference curve, DERIVED from
-# req4_config's current parameters every time this module is imported --
-# never a pasted string (see req3_config.py's docstring for the stale-cache
-# bug this pattern prevents). Run `python -m utils.precompute_clairvoyant_req4`
-# once to populate it; if missing, the prophet curve is skipped (it is only
-# a reference, not required for the primary diagnostic).
+# Cache key for the dynamic/prophet reference curve, auto-derived from
+# req4_config parameters. Run `python -m utils.precompute_clairvoyant_req4`
+# once to populate the cache; if missing, the prophet curve is skipped
+# (only the reference benchmark, not required for the primary diagnostic).
 CLAIRVOYANT_CACHE_KEY = make_cache_key(mode="shocks", mode_params=SHOCKS_MODE_PARAMS)
 
-# Budget pacing: matches Requirement 3's definitive configuration
-# (run_req3.py, BUDGET_PACING=True) -- rho_t = remaining_budget /
-# remaining_rounds instead of the fixed rho = B/T.
+# Budget pacing: rho_t = remaining_budget / remaining_rounds (adaptive).
 BUDGET_PACING = True
 
-# Tuned empirically for THIS environment ('shocks'), WITH budget_pacing=True
-# (see tune_ogd_eta() below): a coarse sweep over {0.005, 0.01, 0.017,
-# 0.028, 0.04, 0.06} found a clean minimum at 0.017; a finer sweep over
-# {0.012, 0.014, 0.017, 0.02, 0.023} showed that region is statistically
-# flat. ogd_eta=0.017 is kept: indistinguishable from the refined optimum
-# AND matches Requirement 3's own independently-tuned value (run_req3.py's
-# OGD_ETA=0.017, tuned on 'drift') -- the same rate working well in both
-# non-stationarity regimes is a reassuring, reportable finding.
+# OGD learning rate for the dual variable lambda. Tuned empirically via
+# tune_ogd_eta() on the 'shocks' environment with budget_pacing=True;
+# the same value was found independently optimal for 'drift' in run_req3.py.
 PD_OGD_ETA = 0.017
 
 

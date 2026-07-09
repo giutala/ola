@@ -3,32 +3,23 @@ run_req3.py
 -----------
 Requirement 3: best-of-both-worlds bidding for N campaigns.
 
-Algorithm: PrimalDualMultiCampaignAgent — Hedge as primal regret minimiser
-(one per campaign, full feedback) coupled to a shared OGD step on the dual
-variable lambda.  Conflicts are enforced both by MultiCampaignEnv.round and
-by the suppression rule applied to Hedge counterfactual rewards (NB08
-pattern).
+Algorithm: PrimalDualMultiCampaignAgent — one Hedge regret minimiser per
+campaign (full feedback) coupled to a shared OGD dual variable for the budget.
 
-Two experiments
----------------
-A. Stochastic environment (MultiCampaignEnv, NB07 setup) — baseline is the
-   fixed LP optimum (compute_clairvoyant_multi), computed once from the
-   true win probabilities.
+Two experiments demonstrate the best-of-both-worlds property:
 
-B. Adversarial / non-stationary environment (AdversarialMultiCampaignEnv)
-   — baseline is OPT^A, the best FIXED distribution in hindsight (NB08
-   cells 8-11), computed per trial from the empirical win probabilities
-   of that trial's realised m-sequence (env.empirical_win_probabilities)
-   fed into the same compute_clairvoyant_multi LP.  This is the benchmark
-   a primal-dual (Hedge+OGD) regret minimiser actually has a provable
-   sublinear-regret guarantee against, in both the stochastic and the
-   adversarial regime -- the "best-of-both-worlds" property.  Comparing
-   against the best DYNAMIC sequence in hindsight instead (a per-round-
-   adaptive benchmark) makes regret linear by construction in a "highly
-   non-stationary" environment, regardless of how good the agent is.
+  A. Stochastic environment (MultiCampaignEnv) — benchmark is the fixed LP
+     optimum computed once from the true win probabilities.
 
-T=10_000 matches R1 / R2 for a valid cross-requirement regret comparison.
-B scaled so rho=0.16 is unchanged.
+  B. Adversarial / non-stationary environment (AdversarialMultiCampaignEnv,
+     mode='drift') — benchmark is OPT^A, the best FIXED distribution in
+     hindsight, computed per trial from the empirical win probabilities of
+     that trial's realised m-sequence. This is the benchmark against which a
+     primal-dual (Hedge+OGD) agent has a provable sublinear-regret guarantee
+     in both stochastic and adversarial settings.
+
+Parameters are imported from req3_config.py (shared with req2, req4, and the
+precompute scripts) so all requirements operate on the same problem instance.
 
 Call from the notebook: run_req3()
 """
@@ -56,28 +47,19 @@ from utils.req3_config import (
 logger = logging.getLogger(__name__)
 
 # ── Parameters ──────────────────────────────────────────────────────────────
-# VALUES, T, BUDGET, N_TRIALS, N_COMPETITORS, CONFLICT_EDGES, AVAILABLE_BIDS
-# all come from utils/req3_config.py, the single source of truth shared with
-# precompute_clairvoyant.py. Change them there, not here, so the two scripts
-# can never drift apart again.
+# Shared problem parameters (VALUES, T, BUDGET, etc.) are imported from
+# req3_config.py. Modify them there to keep all requirements in sync.
 
-# Non-stationarity pattern of the adversarial environment.
-#   'drift'  : m_t ~ Beta with sinusoidal mean — changes every round
-#   'shocks' : piecewise-stationary, distribution changes per block
-# Switch this single constant to compare the two regimes.
-ENV_MODE = "drift"  # "drift" or "shocks"
+# Non-stationarity mode: 'drift' (sinusoidal mean, changes every round)
+# or 'shocks' (piecewise-stationary blocks).
+ENV_MODE = "drift"
 
-# Dual-gradient mode of the primal-dual agent.
-#   False : NB08 fixed target rho = B/T                  (traditional gradient)
-#   True  : adaptive target rho_t = residual / remaining (budget pacing)
-# Flip this single constant to switch the whole run between the two.
+# Budget pacing: if True, uses adaptive rho_t = remaining_budget / remaining_rounds
+# instead of the fixed rho = B/T.
 BUDGET_PACING = True
 
-# Dual (OGD) learning rate for lambda.
-#   None  : NB08 default 1/sqrt(T) (= 0.01 at T=10_000)
-#   float : tuned value. With pacing ON, ~0.035 makes lambda react fast enough
-#           to (nearly) eliminate the budget-exhaustion tail without over-
-#           suppressing spending. See the ogd_eta sweep for the trade-off.
+# OGD learning rate for the dual variable lambda. 0.017 was found to minimise
+# final regret with budget_pacing=True on the 'drift' environment.
 OGD_ETA = 0.017
 
 
@@ -95,9 +77,8 @@ def run_req3():
     )
 
     # ── Factories shared across the two experiments ───────────────────────
-    # We freeze a "reference" env (seed=0) only to read Ks and bid_sets,
-    # which are deterministic functions of values + AVAILABLE_BIDS and
-    # therefore the same for every trial.
+    # A reference env (seed=0) is used only to read Ks and bid_sets, which
+    # are deterministic functions of values + AVAILABLE_BIDS.
     _env_ref_stoch = MultiCampaignEnv(
         values=VALUES, budget=BUDGET, T=T,
         available_bids=AVAILABLE_BIDS, n_competitors=N_COMPETITORS,
@@ -130,7 +111,6 @@ def run_req3():
             conflict_edges=CONFLICT_EDGES, seed=seed,
         )
 
-    # Stochastic baseline: fixed LP optimum.  Computed once.
     win_probs = _env_ref_stoch.win_probabilities()
     _, opt_stoch = compute_clairvoyant_multi(
         np.array(VALUES), BID_SETS, BUDGET / T, win_probs, CONFLICT_EDGES,
@@ -141,7 +121,7 @@ def run_req3():
         env_factory   = env_factory_stoch,
         agent_factory = make_agent,
         n_trials      = N_TRIALS,
-        opt_per_round = opt_stoch,            # Mode B: fixed baseline
+        opt_per_round = opt_stoch,
         name          = "req3_stochastic",
     )
 
@@ -159,10 +139,8 @@ def run_req3():
             conflict_edges=CONFLICT_EDGES, seed=seed, mode=ENV_MODE,
         )
 
-    # No opt_per_round given -> run_primal_dual_trials computes OPT^A (best
-    # fixed distribution in hindsight) per trial from the empirical win
-    # probabilities of that trial's realised m-sequence. See NB08 cells 8-11
-    # and the run_primal_dual_trials docstring in experiments.py.
+    # opt_per_round=None → run_primal_dual_trials computes OPT^A per trial
+    # from the empirical win probabilities (env.empirical_win_probabilities()).
     res_adv = run_primal_dual_trials(
         env_factory   = env_factory_adv,
         agent_factory = make_agent,

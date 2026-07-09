@@ -1,17 +1,15 @@
 """
 precompute_clairvoyant_req4.py
---------------------------------
-One-shot script: precompute the dynamic clairvoyant for Requirement 4
-(mode='shocks') for every trial seed and cache it to disk, so run_req4.py
-doesn't re-solve an expensive LP (~440k variables for T=10000, N=4, K up to
-11) inside every trial of every re-run.
+------------------------------
+One-shot script: pre-compute and cache the dynamic/prophet clairvoyant for
+Requirement 4 (mode='shocks') across all trial seeds, so run_req4.py does
+not need to solve the full LP (~440k variables for T=10000, N=4, K=11) on
+every re-run.
 
-Mirrors the precompute_clairvoyant.py / req3_config.py pattern already in
-this repo: parameters come from utils/req4_config.py (itself built on top
-of utils/req3_config.py) so run_req4.py and this script can never disagree,
-and the cache key is a hash of every LP-relevant parameter -- a parameter
-change automatically invalidates the cache instead of silently loading a
-stale one (see req3_config.py's docstring for the bug this pattern fixes).
+All problem parameters come from req4_config.py (which imports the shared
+base from req3_config.py), so this script and run_req4.py are always in
+sync. The cache key is a hash of all LP-relevant parameters; a parameter
+change automatically invalidates the cache.
 
 Usage
 -----

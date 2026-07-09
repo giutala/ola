@@ -1,15 +1,21 @@
 """
 experiments.py
 --------------
-Clairvoyant solvers, multi-trial runners, and plots.
+Clairvoyant LP solvers, multi-trial runners, and plotting utilities.
 
-Everything mirrors the notebook patterns:
-  - compute_clairvoyant  ← NB07 cell 26
-  - multi-trial loop     ← NB01 cell 25 / NB07 cell 67
-  - plot_regret          ← NB01 cell 25 fill_between pattern
-  - plot_budget          ← NB07 cell 44 / 64 pattern
+Clairvoyants
+  compute_clairvoyant_single           Single-campaign LP (Requirement 1).
+  compute_clairvoyant_multi            Multi-campaign LP (Requirements 2–4).
+  compute_clairvoyant_dynamic_multi    Dynamic/prophet oracle (reference upper bound).
+  compute_piecewise_expected_clairvoyant   Piecewise oracle (Requirement 4 primary).
 
-All plots are saved to outputs/ automatically at every run.
+Trial runners
+  run_single_campaign_trials     Requirement 1 loop.
+  run_multi_campaign_trials      Requirement 2 loop.
+  run_primal_dual_trials         Requirement 3 full-feedback loop.
+  run_nonstationary_trials       Requirement 4 loop with multiple benchmarks.
+
+All plots are auto-saved to outputs/ at every call.
 """
 
 import logging
@@ -33,46 +39,58 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 # ---------------------------------------------------------------------------
 
 
-def compute_clairvoyant_single(available_bids, value, rho, win_probabilities):
+def compute_clairvoyant_single(
+    available_bids: np.ndarray,
+    value: float,
+    rho: float,
+    win_probabilities: np.ndarray,
+) -> tuple[np.ndarray, float, float]:
     """
-    NB07 cell 26 – compute_clairvoyant.
+    Single-campaign clairvoyant LP.
+
+    Solves:
+        max_gamma  sum_b gamma_b (value - bid_b) P(win_b)
+        s.t.       sum_b gamma_b bid_b P(win_b) <= rho
+                   sum_b gamma_b = 1,  gamma_b >= 0
 
     Parameters
     ----------
-    available_bids   : np.ndarray shape (K,)
-    value            : float
-    rho              : float   per-round budget
-    win_probabilities: np.ndarray shape (K,)  P(bid >= m) per bid
+    available_bids    : np.ndarray shape (K,)
+    value             : float
+    rho               : float   per-round budget rate
+    win_probabilities : np.ndarray shape (K,)   P(bid >= m) per bid
 
     Returns
     -------
-    gamma            : np.ndarray  optimal bid distribution
-    opt_utility      : float       expected per-round utility  (-res.fun)
-    exp_payment      : float       expected per-round cost
+    gamma       : np.ndarray   optimal bid distribution
+    opt_utility : float        expected per-round utility
+    exp_payment : float        expected per-round cost
     """
-    c = -(value - available_bids) * win_probabilities
-    A_ub = [available_bids * win_probabilities]
-    b_ub = [rho]
-    A_eq = [np.ones(len(available_bids))]
-    b_eq = [1]
+    K = len(available_bids)
     res = optimize.linprog(
-        c,
-        A_ub=A_ub,
-        b_ub=b_ub,
-        A_eq=A_eq,
-        b_eq=b_eq,
-        bounds=(0, 1),
+        -(value - available_bids) * win_probabilities,
+        A_ub=[available_bids * win_probabilities],
+        b_ub=[rho],
+        A_eq=[np.ones(K)],
+        b_eq=[1.0],
+        bounds=[(0.0, 1.0)] * K,
+        method="highs",
     )
     gamma = res.x
     return gamma, -res.fun, float(np.sum(available_bids * gamma * win_probabilities))
 
 
-def compute_ucb1_gap_upper_bound(expected_rewards, reward_range, T):
+def compute_ucb1_gap_upper_bound(
+    expected_rewards: np.ndarray,
+    reward_range: float,
+    T: int,
+) -> np.ndarray:
     """
     Gap-dependent UCB1 regret upper bound for bounded rewards in [0, reward_range].
 
-    This is a real theoretical upper bound, not a visually rescaled reference
-    curve. It is intentionally loose, as finite-time UCB1 constants usually are.
+    Returns the true finite-time bound summed over all suboptimal arms. The
+    bound is intentionally loose at short horizons; its role is to confirm
+    that empirical regret stays below the guarantee, not to predict the level.
     """
     expected_rewards = np.asarray(expected_rewards, dtype=float)
     best = float(np.max(expected_rewards))
@@ -89,24 +107,34 @@ def compute_ucb1_gap_upper_bound(expected_rewards, reward_range, T):
 
 
 def compute_clairvoyant_multi(
-    values, bid_sets, rho, win_prob_list, conflict_edges=None
-):
+    values: np.ndarray,
+    bid_sets: list[np.ndarray],
+    rho: float,
+    win_prob_list: list[np.ndarray],
+    conflict_edges: list[tuple[int, int]] | None = None,
+) -> tuple[list[np.ndarray], float]:
     """
-    Multi-campaign clairvoyant LP. Extends NB07 cell 26 to a distribution over
-    feasible joint bid vectors.
+    Multi-campaign clairvoyant LP over a distribution on feasible joint bid vectors.
+
+    Solves:
+        max_gamma  sum_a gamma_a sum_i (v_i - b_{i,k}) P(win_{i,k})   [for action a]
+        s.t.       sum_a gamma_a sum_i b_{i,k} P(win_{i,k}) <= rho
+                   sum_a gamma_a = 1,  gamma_a >= 0
+
+    Each joint action a is a conflict-graph-feasible bid vector.
 
     Parameters
     ----------
     values        : np.ndarray shape (N,)
     bid_sets      : list[np.ndarray]   per-campaign bid arrays
-    rho           : float
-    win_prob_list : list[np.ndarray]   P(b>=m_i) per campaign
-    conflict_edges: list[(i,j)]
+    rho           : float              per-round budget rate
+    win_prob_list : list[np.ndarray]   P(b >= m_i) per campaign
+    conflict_edges : list[tuple[int, int]], optional
 
     Returns
     -------
-    x_list       : list[np.ndarray]  marginal distribution per campaign
-    opt_utility  : float             expected per-round total utility
+    x_list      : list[np.ndarray]   marginal bid distribution per campaign
+    opt_utility : float              expected per-round total utility
     """
     N = len(values)
     edge_set = {tuple(sorted(edge)) for edge in conflict_edges or []}
@@ -169,33 +197,37 @@ def compute_clairvoyant_multi(
 
 
 def run_single_campaign_trials(
-    env, agent_factory, opt_utility_per_round, n_trials, name="req1"
-):
+    env,
+    agent_factory,
+    opt_utility_per_round: float,
+    n_trials: int,
+    name: str = "req1",
+) -> dict:
     """
     Multi-trial loop for Requirement 1.
-    Mirrors NB01 cell 25 / NB07 cell 67.
 
     Parameters
     ----------
     env : SingleCampaignEnv
-        Reused across trials; reset(seed=i) is called before each trial.
+        Reused across trials; reset(seed=i) is called at the start of each.
     agent_factory : callable() -> agent
-        Called once per trial to create a fresh agent.
+        Called once per trial to produce a fresh agent instance.
     opt_utility_per_round : float
-        Clairvoyant utility per round (constant, computed before the loop).
+        Clairvoyant per-round utility (computed once before the loop).
     n_trials : int
-    name : str   used for pickle filename
+    name : str
+        Stem for the pickle filename saved to data/picklefiles/.
 
     Returns
     -------
-    dict with mean_regret, std_regret, mean_cumcost, n_trials (all arrays of T)
+    dict
+        mean_regret, std_regret, mean_cumcost (all shape (T,)), n_trials.
     """
     logger.info("Running %d trials – %s", n_trials, name)
     regret_per_trial = []
     payments_per_trial = []
 
     for i in range(n_trials):
-        # NB01 cell 25: np.random.seed(i) before each trial
         np.random.seed(i)
         env.reset(seed=i)
         agent = agent_factory()
@@ -207,16 +239,14 @@ def run_single_campaign_trials(
             k = agent.pull_arm()
             f_t, c_t, _ = env.round(k)
 
-            # UCB1 update takes only reward; UCBLike takes (f, c)
-            if hasattr(agent, "avg_f"):  # UCBLikeAgent
+            if hasattr(agent, "avg_f"):
                 agent.update(f_t, c_t)
-            else:  # UCB1Agent
+            else:
                 agent.update(f_t)
 
             utilities[t] = f_t
             costs[t] = c_t
 
-        # NB01 cell 25: cumsum(clairvoyant - agent)
         regret_per_trial.append(np.cumsum(opt_utility_per_round - utilities))
         payments_per_trial.append(np.cumsum(costs))
 
@@ -237,11 +267,13 @@ def run_single_campaign_trials(
 
 
 def run_multi_campaign_trials(
-    env, agent_factory, opt_utility_per_round, n_trials, name="req2"
-):
-    """
-    Multi-trial loop for Requirement 2.  Same structure as NB07 cell 67.
-    """
+    env,
+    agent_factory,
+    opt_utility_per_round: float,
+    n_trials: int,
+    name: str = "req2",
+) -> dict:
+    """Multi-trial loop for Requirement 2. Same structure as run_single_campaign_trials."""
     logger.info("Running %d trials – %s", n_trials, name)
     regret_per_trial = []
     payments_per_trial = []
@@ -286,25 +318,20 @@ def run_multi_campaign_trials(
 
 
 def plot_regret(
-    results,
-    title="Cumulative Pseudo-Regret",
-    filename="regret.png",
-    add_reference=False,
-    upper_bound=None,
-):
+    results: dict,
+    title: str = "Cumulative Pseudo-Regret",
+    filename: str = "regret.png",
+    add_reference: bool = False,
+    upper_bound: tuple | None = None,
+) -> None:
     """
-    NB01 cell 25 pattern:
-      plt.fill_between(..., mean ± std/sqrt(n_trials), alpha=0.3)
-
-    Optionally overlays a user-provided upper bound. The function does not
-    rescale reference curves to the empirical regret, because that would make
-    the visual guide look like a theoretical guarantee when it is not one.
+    Plot mean cumulative pseudo-regret with ±stderr bands.
 
     Parameters
     ----------
-    results       : dict  {label: {mean_regret, std_regret, n_trials}}
-    add_reference : bool  whether to draw an unscaled sqrt(T log T) guide
-    upper_bound   : tuple(label, values), optional true bound to draw
+    results      : dict   {label: {mean_regret, std_regret, n_trials}}
+    add_reference: bool   draw an unscaled sqrt(t log t) guide
+    upper_bound  : tuple(label, values), optional  true bound to overlay
     """
     fig, ax = plt.subplots(figsize=(9, 5))
     T = len(next(iter(results.values()))["mean_regret"])
@@ -594,38 +621,37 @@ def plot_chosen_bids(agent, available_bids, title="Chosen Bids", filename="bids.
 # ---------------------------------------------------------------------------
 
 
-def compute_clairvoyant_dynamic_multi(m_seq, values, bid_sets, budget, conflict_edges=None):
+def compute_clairvoyant_dynamic_multi(
+    m_seq: np.ndarray,
+    values: np.ndarray,
+    bid_sets: list[np.ndarray],
+    budget: float,
+    conflict_edges: list[tuple[int, int]] | None = None,
+) -> tuple[float, float]:
     """
-    Best dynamic feasible sequence of bids in hindsight (project spec p.9),
-    a.k.a. the "prophet" oracle: it knows every realised m_t before
-    choosing the round's action.
+    Dynamic clairvoyant ("prophet") oracle: knows every realised m_t in advance.
 
-    Solves one LP over the ENTIRE horizon:
+    Solves one LP over the full horizon:
 
         max  sum_{t,i,k} y_{t,i,k} (v_i - b_{i,k}) 1[b_{i,k} >= m_{t,i}]
         s.t. sum_{t,i,k} y_{t,i,k} b_{i,k} 1[b_{i,k} >= m_{t,i}] <= B
-             sum_k y_{t,i,k} <= 1                    for all t, i
-             sum_k y_{t,i,k} + sum_k y_{t,j,k} <= 1   for all t, (i,j) in E
+             sum_k y_{t,i,k} <= 1                     for all t, i
+             sum_k y_{t,i,k} + sum_k y_{t,j,k} <= 1    for all t, (i,j) in E
              0 <= y_{t,i,k} <= 1
 
-    Why report this at all, given it is NOT the primary Requirement 4
-    diagnostic (see compute_piecewise_expected_clairvoyant below): even
-    within one stationary interval, m_t is a fresh i.i.d. draw every round.
-    A clairvoyant with full hindsight can react to the SPECIFIC realised
-    m_t each round, not just to the interval's distribution -- by Jensen's
-    inequality, E[max_k f_k(m_t)] >= max_k E[f_k(m_t)], so comparing a
-    learner against this oracle inflates regret by a term that is LINEAR
-    in T regardless of learner quality (the "prophet premium" -- see
-    docs/Req4_Linear_Regret_Baseline.tex for the full derivation). Kept
-    here as an upper-bound reference only, not as the metric used to judge
-    whether an algorithm is "learning".
+    This oracle's per-round foreknowledge of m_t means it can react to each
+    specific draw within a stationary block, not just to the block's distribution.
+    By Jensen's inequality, this inflates regret by a term linear in T regardless
+    of learner quality (the prophet premium). It is kept as a reference upper-bound
+    only; the primary Requirement 4 diagnostic is the piecewise expected clairvoyant.
 
-    This LP is expensive (~440k variables for T=10000, N=4, K=11) -- see
-    precompute_clairvoyant.py for a caching utility.
+    This LP has ~440k variables for T=10000, N=4, K=11. Use the precompute scripts
+    to cache results rather than solving inside the trial loop.
 
     Returns
     -------
-    opt_utility_total, opt_utility_per_round : float, float
+    opt_utility_total    : float   total utility over the horizon
+    opt_utility_per_round: float   opt_utility_total / T
     """
     from scipy.sparse import csr_matrix
 
@@ -717,41 +743,33 @@ def _build_feasible_joint_actions(bid_sets, conflict_edges=None):
     return actions
 
 
-def compute_piecewise_expected_clairvoyant(env):
+def compute_piecewise_expected_clairvoyant(env) -> tuple[float, np.ndarray]:
     """
-    Distributional clairvoyant for Requirement 4's 'shocks' environment --
-    the PRIMARY benchmark for judging Sliding-Window / CUSUM Combinatorial-
-    UCB (see docs/Req4_Linear_Regret_Baseline.tex and
-    docs/Req4_Baseline_Code_Fix_Practical.tex for the full derivation and
-    the practical code walkthrough this implementation follows).
+    Piecewise expected clairvoyant — the PRIMARY Requirement 4 benchmark.
 
-    The oracle knows the stationary blocks' boundaries and their TRUE Beta
-    distributions (env.piecewise_win_probabilities(), computed analytically
-    from the parameters that generated each block -- not the realised
-    m_t). It solves ONE LP with one mixed action per block, coupled by the
-    original shared budget across the whole horizon:
+    Knows block boundaries and true block distributions (from
+    env.piecewise_win_probabilities()) but NOT the realised m_t each round.
+    Solves one LP with one mixed action per block, coupled by the shared budget:
 
-        max_{x_{s,a}>=0}  sum_s |I_s| sum_a x_{s,a} Ubar_s(a)
-        s.t.              sum_s |I_s| sum_a x_{s,a} Cbar_s(a) <= B
-                           sum_a x_{s,a} = 1   for every block s
+        max_{x_{s,a}>=0}  sum_s |I_s| sum_a x_{s,a} E_s[utility(a)]
+        s.t.              sum_s |I_s| sum_a x_{s,a} E_s[cost(a)] <= B
+                          sum_a x_{s,a} = 1   for every block s
 
-    This sits strictly between OPT^A (one single fixed distribution for
-    the WHOLE horizon, no interval-awareness) and the dynamic/prophet
-    clairvoyant above (round-by-round realised-bid foreknowledge): it
-    rewards an agent for tracking regime changes (unlike OPT^A) without
-    unrealistically gifting it the exact realised outcome of each round
-    (unlike the prophet). It is also the natural benchmark for SW-UCB /
-    CUSUM-UCB specifically, since their literature guarantees (e.g.
-    Garivier & Moulines 2011) are against the best PER-SEGMENT action, not
-    a single fixed one nor a round-by-round oracle.
+    This benchmark sits between OPT^A (one fixed distribution for the whole
+    horizon, no regime awareness) and the dynamic/prophet oracle (knows every
+    realised m_t). It rewards an agent for tracking regime changes without
+    providing per-round foreknowledge — the natural target for SW-UCB and
+    CUSUM-UCB, which have literature tracking guarantees against the best
+    per-segment action (e.g. Garivier & Moulines 2011).
+
+    Parameters
+    ----------
+    env : AdversarialMultiCampaignEnv with mode='shocks'
 
     Returns
     -------
-    opt_total : float
-        Expected total utility over the horizon.
-    expected_per_round : np.ndarray shape (T,)
-        Blockwise expected optimal utility, broadcast per round (constant
-        within each block) -- for cumulative regret plots.
+    opt_total           : float           expected total utility over horizon
+    expected_per_round  : np.ndarray (T,) blockwise expected utility per round
     """
     blocks = env.piecewise_win_probabilities()
     actions = _build_feasible_joint_actions(env.bid_sets, env.conflict_edges)
@@ -832,8 +850,8 @@ def load_clairvoyant_cache(path_or_key):
     return cache
 
 
-def plot_lambda(results, title=r"Lagrange multiplier $\lambda_t$", filename="lambda.png"):
-    """NB08 cell 17 pattern: plot lambda over time, one line per agent."""
+def plot_lambda(results: dict, title: str = r"Lagrange multiplier $\lambda_t$", filename: str = "lambda.png") -> None:
+    """Plot the Lagrange multiplier trajectory, one line per agent."""
     fig, ax = plt.subplots(figsize=(9, 5))
     T = len(next(iter(results.values()))["mean_lmbd"])
     ts = np.arange(1, T + 1)
@@ -873,56 +891,41 @@ def plot_resets_histogram(resets_per_trial, title="CUSUM resets per trial",
 
 
 def run_primal_dual_trials(
-    env_factory, agent_factory, n_trials,
-    opt_per_round=None,
-    name="req3",
-):
+    env_factory,
+    agent_factory,
+    n_trials: int,
+    opt_per_round: float | None = None,
+    name: str = "req3",
+) -> dict:
     """
-    Multi-trial loop for the primal-dual agent (Requirement 3).
+    Multi-trial loop for PrimalDualMultiCampaignAgent (Requirement 3).
 
-    Baseline (resolved per-trial):
+    Baseline selection:
+      - opt_per_round provided  → fixed per-round clairvoyant (stochastic regime).
+      - opt_per_round is None   → OPT^A per trial: best FIXED distribution in
+        hindsight, computed from env.empirical_win_probabilities() fed into
+        compute_clairvoyant_multi. This is the benchmark a primal-dual
+        (Hedge + OGD) agent has a provable sublinear-regret guarantee against
+        in both stochastic and adversarial settings.
 
-      1. ``opt_per_round`` is set (and not None)
-         -> use it as a fixed per-round baseline across all trials.
-         Stochastic regime: cheap, computed once via
-         ``compute_clairvoyant_multi`` on the true win probabilities.
-
-      2. ``opt_per_round`` is None
-         -> OPT^A: the best FIXED distribution in hindsight (NB08 cells
-         8-11), computed per trial from the empirical win probabilities
-         of that trial's realised m-sequence
-         (``env.empirical_win_probabilities()``) fed into the same
-         ``compute_clairvoyant_multi`` LP. This -- not the best DYNAMIC
-         sequence in hindsight -- is the benchmark against which a
-         primal-dual (Hedge+OGD) regret minimiser has a provable
-         sublinear-regret guarantee in adversarial / non-stationary
-         settings; comparing against a per-round-adaptive dynamic
-         optimum instead makes the regret linear by construction,
-         regardless of how good the agent is.
-
-    Differences from ``run_multi_campaign_trials``
-    ----------------------------------------------
-    1. Calls ``agent.update(f_t, c_t, m_t)`` (full feedback).
-    2. Builds a fresh env per trial via ``env_factory(seed=i)``.
-    3. Tracks per-trial lambda trajectories (mean +/- std).
+    Differences from run_multi_campaign_trials:
+      - Calls agent.update(f_t, c_t, m_t) with full feedback.
+      - Creates a fresh env per trial via env_factory(seed=i).
+      - Tracks per-trial lambda trajectories for plotting.
 
     Parameters
     ----------
-    env_factory       : callable(seed: int) -> env
-    agent_factory     : callable() -> PrimalDualMultiCampaignAgent
-    n_trials          : int
-    opt_per_round     : float | None
-    name              : str   pickle filename stem
+    env_factory    : callable(seed: int) -> env
+    agent_factory  : callable() -> PrimalDualMultiCampaignAgent
+    n_trials       : int
+    opt_per_round  : float | None
+    name           : str   pickle filename stem
 
     Returns
     -------
-    dict with keys:
-        mean_regret, std_regret  : (T,) arrays
-        mean_cumcost             : (T,) array
-        mean_lmbd, std_lmbd      : (T,) array
-        n_trials                 : int
+    dict with mean_regret, std_regret, mean_cumcost, mean_lmbd, std_lmbd (T,), n_trials.
     """
-    mode = "stochastic (fixed OPT)" if opt_per_round is not None else "adversarial (per-trial OPT^A, fixed-hindsight)"
+    mode = "stochastic (fixed OPT)" if opt_per_round is not None else "adversarial (per-trial OPT^A)"
     logger.info("Running %d trials - %s - %s", n_trials, name, mode)
 
     regret_per_trial = []
@@ -980,37 +983,45 @@ def run_primal_dual_trials(
     return out
 
 
-def run_nonstationary_trials(env_factory, agent_factory, n_trials, name="req4",
-                              clairvoyant_cache=None, compute_opt_a=True,
-                              compute_piecewise=True):
+def run_nonstationary_trials(
+    env_factory,
+    agent_factory,
+    n_trials: int,
+    name: str = "req4",
+    clairvoyant_cache: dict | None = None,
+    compute_opt_a: bool = True,
+    compute_piecewise: bool = True,
+) -> dict:
     """
-    Requirement 4 multi-trial loop: fresh env + agent per trial, automatic
-    dispatch between semi-bandit agents (update(f,c)) and full-feedback
-    agents (update(f,c,m), detected via the `hedge_agents` attribute unique
-    to PrimalDualMultiCampaignAgent).
+    Requirement 4 multi-trial loop with up to three benchmarks.
 
-    Computes regret against up to THREE benchmarks per trial, so the
-    choice of "which is the real result" can be made once, at plotting
-    time, without re-running anything:
+    Creates a fresh env and agent per trial; dispatches between semi-bandit
+    agents (update(f, c)) and full-feedback agents (update(f, c, m)) based
+    on whether the agent has a hedge_agents attribute.
 
-      - dynamic / prophet   (mean_regret / std_regret) -- always computed
-        (cached if `clairvoyant_cache` is given). Reported as an upper-
-        bound reference, NOT the primary diagnostic -- see
-        compute_clairvoyant_dynamic_multi's docstring.
-      - piecewise expected  (mean_regret_piecewise / std_regret_piecewise)
-        -- the PRIMARY Requirement 4 benchmark, if compute_piecewise=True
-        and env supports it (mode='shocks'). See
-        compute_piecewise_expected_clairvoyant's docstring.
-      - OPT^A               (mean_regret_opt_a / std_regret_opt_a) -- if
-        compute_opt_a=True. Same benchmark/methodology as Requirement 3's
-        own run_primal_dual_trials, kept for continuity across the two
-        requirements.
+    Benchmarks computed per trial:
+      - dynamic/prophet  (mean_regret)         — always; cached if cache given.
+        Reference upper bound only; see compute_clairvoyant_dynamic_multi.
+      - piecewise expected  (mean_regret_piecewise) — if compute_piecewise=True
+        and env supports mode='shocks'. PRIMARY Requirement 4 diagnostic.
+      - OPT^A  (mean_regret_opt_a)             — if compute_opt_a=True.
+        Same methodology as Requirement 3; kept for cross-requirement continuity.
 
-    Returns a dict with mean_regret, std_regret, mean_cumcost, n_trials,
-    plus mean_regret_piecewise/std_regret_piecewise,
-    mean_regret_opt_a/std_regret_opt_a (if computed), mean_lmbd/std_lmbd
-    (if the agent tracks lmbds_history), and resets_per_trial (if the
-    agent tracks n_resets, e.g. the CUSUM agent).
+    Parameters
+    ----------
+    env_factory       : callable(seed: int) -> env
+    agent_factory     : callable() -> agent
+    n_trials          : int
+    name              : str   pickle filename stem
+    clairvoyant_cache : dict {seed: {opt_per_round: float}}, optional
+    compute_opt_a     : bool
+    compute_piecewise : bool
+
+    Returns
+    -------
+    dict with mean_regret, std_regret, mean_cumcost, n_trials, plus
+    mean_regret_piecewise/std_regret_piecewise, mean_regret_opt_a/std_regret_opt_a,
+    mean_lmbd/std_lmbd, and resets_per_trial (agent-dependent).
     """
     logger.info("Running %d trials - %s (cache=%s, opt_a=%s, piecewise=%s)",
                 n_trials, name, "yes" if clairvoyant_cache else "no",

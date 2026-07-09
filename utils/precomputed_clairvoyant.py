@@ -1,40 +1,29 @@
 """
 precompute_clairvoyant.py
 -------------------------
-One-shot script: pre-compute the dynamic clairvoyant (Requirement 3
-adversarial baseline) for every trial seed and pickle the results.
+One-shot script: pre-compute and cache the dynamic/prophet clairvoyant for
+Requirement 3 (adversarial baseline) across all trial seeds and modes.
 
-Why this script exists
-----------------------
-For T=10000, N=4, K=11, |E|=2 the dynamic-clairvoyant LP has ~440k
-variables and ~70k constraints.  Even with a sparse CSR encoding and
-HiGHS, each LP takes 5-30 seconds.  Computing it inside the trial loop
-means n_trials LPs per re-run — a strong incentive to cache.
+The dynamic-clairvoyant LP has ~440k variables for T=10000, N=4, K=11, so
+solving it inside the trial loop would take 5–30 s per trial. This script
+runs the LPs once and pickles the results; run_primal_dual_trials loads the
+cache and skips the LP entirely on subsequent runs.
 
-Run this once (e.g. overnight).  `run_primal_dual_trials` will then
-read the pickle and skip the LP entirely.  This script loops over every
-mode in `MODES` so you get a separate cache file for each adversarial
-regime, and `run_req3.py` can pick the right one based on its `ENV_MODE`.
+All problem parameters are imported from req3_config.py (shared with
+run_req3.py) so the two scripts can never use inconsistent parameters.
+The cache key is a hash of all LP-relevant parameters; any change
+automatically invalidates the cache (clean fallback to on-the-fly LP).
 
 Usage
 -----
-    Run from inside the utils/ directory (this script uses bare imports,
-    e.g. `from environments import ...`, not package-relative ones):
+    Run from the utils/ directory (uses bare imports):
 
-        cd Project/utils
+        cd utils/
         python precomputed_clairvoyant.py
-
-The cache key is a hash of the relevant problem parameters:
-  (T, N, values, budget, conflict_edges, available_bids, n_competitors, mode)
-plus the seed.  Changing any of these invalidates the cache for that key.
-All of these parameters -- and the hashing function itself -- live in
-req3_config.py, which run_req3.py also imports, so the two scripts can
-never drift apart again.
 
 Output
 ------
-data/picklefiles/clairvoyant_dyn_{key}.pkl  — dict {seed: opt_per_round}
-                                              one file per mode
+data/picklefiles/clairvoyant_dyn_{key}.pkl — dict {seed: {opt_total, opt_per_round}}
 """
 
 import logging

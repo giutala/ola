@@ -1,20 +1,16 @@
 """
 req3_config.py
----------------
-Single source of truth for Requirement 3 parameters.
+--------------
+Single source of truth for all multi-campaign problem parameters.
 
-Both run_req3.py and precompute_clairvoyant.py import from here instead of
-keeping their own copies. This is what caused the negative-regret bug:
-precompute_clairvoyant.py had its own VALUES/BUDGET constants and went
-stale after run_req3.py's were tuned, so the cached dynamic clairvoyant
-was solved for a 3x tighter budget than the one actually used at run time
--- an artificially low baseline that made the agent's regret go negative.
+All four requirements share the same T, BUDGET, N, VALUES, CONFLICT_EDGES,
+AVAILABLE_BIDS, and N_COMPETITORS so that regret curves remain directly
+comparable across requirements. run_req2.py, run_req3.py, run_req4.py, and
+the precompute scripts all import from here.
 
-make_cache_key() is also centralised here so the hash is always computed
-the same way on both sides: same parameters -> same key, always. If a
-parameter changes, the key changes automatically and a stale cache simply
-misses (clean fallback to the on-the-fly LP) instead of being loaded
-silently.
+make_cache_key() produces a short hex digest of the LP-relevant parameters
+so that a parameter change automatically invalidates cached dynamic clairvoyants
+instead of silently loading a stale result.
 """
 
 import hashlib
@@ -33,16 +29,16 @@ ADVERSARIAL_ENV_CLASS_NAME = "AdversarialMultiCampaignEnv"
 
 
 def make_cache_key(
-    mode,
-    T=T,
+    mode: str,
+    T: int = T,
     values=VALUES,
-    budget=BUDGET,
+    budget: float = BUDGET,
     conflict_edges=CONFLICT_EDGES,
     available_bids=AVAILABLE_BIDS,
     n_competitors=N_COMPETITORS,
-    env_class_name=ADVERSARIAL_ENV_CLASS_NAME,
-):
-    """Short hex digest that changes whenever any LP-relevant parameter changes."""
+    env_class_name: str = ADVERSARIAL_ENV_CLASS_NAME,
+) -> str:
+    """Short 12-character hex digest of all LP-relevant parameters."""
     payload = repr((
         env_class_name,
         int(T),

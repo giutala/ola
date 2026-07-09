@@ -1,7 +1,7 @@
 # OLA – Online Learning Applications Project
 
 **Course:** Online Learning Applications – M. Castiglioni  
-**Goal:** Design online learning algorithms to bid on advertising campaigns under budget constraints.
+**Goal:** Design online learning algorithms to bid in first-price auctions under a shared budget constraint.
 
 ---
 
@@ -12,85 +12,167 @@
 uv sync          # installs all deps + creates venv
 ```
 
+---
+
 ## Project Structure
 
 ```
 ola/
 ├── deliverables/
-│   ├── req1_single_campaign.ipynb   ← Requirement 1
-│   └── req2_multi_campaign.ipynb    ← Requirement 2
-├── docs/
-│   ├── reports/                     ← generated PDF reports
-│   └── req1_req2_corrections.tex
+│   ├── req1_single_campaign.ipynb         ← Requirement 1 notebook
+│   ├── req2_multi_campaign.ipynb          ← Requirement 2 notebook
+│   ├── req3_best_of_both_world.ipynb      ← Requirement 3 notebook
+│   └── req4_slightly_nonstationary.ipynb  ← Requirement 4 notebook
 ├── utils/
-│   ├── environments.py              ← SingleCampaignEnv, MultiCampaignEnv
-│   ├── agents.py                    ← UCB1BiddingAgent, UCBLikeBiddingAgent, CombinatorialUCBAgent
-│   ├── experiments.py               ← clairvoyants, trial runners, plots
-│   ├── run_req1.py                  ← full R1 pipeline (called from notebook)
-│   └── run_req2.py                  ← full R2 pipeline (called from notebook)
-├── data/picklefiles/                ← saved results
-├── outputs/
-│   ├── req1/                        ← Requirement 1 plots
-│   └── req2/                        ← Requirement 2 plots
+│   ├── agents.py                          ← all bidding agents (req1–req4)
+│   ├── environments.py                    ← SingleCampaignEnv, MultiCampaignEnv, AdversarialMultiCampaignEnv
+│   ├── experiments.py                     ← trial runners, LP clairvoyants, plotting helpers
+│   ├── req3_config.py                     ← shared problem parameters for req2–req4
+│   ├── req4_config.py                     ← req4-specific parameters (block_size, SW_WINDOW, …)
+│   ├── run_req1.py                        ← Requirement 1 pipeline
+│   ├── run_req2.py                        ← Requirement 2 pipeline
+│   ├── run_req3.py                        ← Requirement 3 pipeline
+│   ├── run_req4.py                        ← Requirement 4 pipeline
+│   ├── precomputed_clairvoyant.py         ← one-shot cache builder for req3 dynamic clairvoyant
+│   └── precompute_clairvoyant_req4.py     ← one-shot cache builder for req4 dynamic clairvoyant
+├── data/picklefiles/                      ← cached clairvoyant LP solutions
+├── outputs/                               ← generated plots (req1/, req2/, r3/, r4/)
 ├── pyproject.toml
 └── README.md
 ```
 
 ---
 
-## Requirements implemented
+## Shared Problem Instance
 
-### Requirement 1 – Single campaign, stochastic environment ✅
-- **Environment:** `SingleCampaignEnv` — first-price auction, competing bids ~ Beta(α, β) i.i.d.
-- **UCB1 (budget-unaware):** treats each bid as a MAB arm, maximises utility with no budget constraint.
-- **UCB-like (budget-aware):** maintains UCB on reward and LCB on cost per bid, solves LP at each round to find the optimal randomised bid within the budget.
+Requirements 2–4 all operate on the **same** problem instance, defined in `utils/req3_config.py`:
 
-### Requirement 2 – Multiple campaigns, stochastic environment ✅
-- **Environment:** `MultiCampaignEnv` — N independent first-price auctions, shared budget, conflict graph (non-compatible campaigns).
-- **Combinatorial-UCB:** extends the single-campaign UCB-like approach. Solves a joint LP over all N campaigns respecting the shared budget and the conflict-graph constraints.
+| Parameter | Value |
+|-----------|-------|
+| N (campaigns) | 4 |
+| T (rounds) | 10 000 |
+| B (budget) | 1 600 |
+| ρ = B/T | 0.16 |
+| Values | [0.8, 0.8, 0.9, 0.9] |
+| Bid grid | linspace(0, 1, 11) |
+| Competitors per campaign | 3 (each) |
+| Conflict edges | (0,1), (2,3) |
 
-### Requirement 3 – Best-of-both-worlds, multiple campaigns ✅
-- **Environment:** `AdversarialMultiCampaignEnv(mode='drift')` — same campaigns/conflict graph as Requirement 2, but the highest competing bid drifts every round.
-- **Primal-Dual:** one Hedge regret-minimiser per campaign (full feedback) + one shared OGD dual variable for the budget, with `budget_pacing=True` (adaptive `rho_t = remaining_budget/remaining_rounds`) and `ogd_eta=0.017`. Benchmarked against OPT$^A$ (best fixed distribution in hindsight) — the benchmark Hedge actually has a provable sublinear-regret guarantee against.
-- See `deliverables/req3_best_of_both_world.ipynb`.
+Requirement 1 uses the same T and ρ (generous scenario) or ρ=0.04 (tight scenario), but a single campaign and a coarser bid grid (linspace(0,1,6)) to make gap-dependent UCB behaviour visible at T=10 000.
 
-### Requirement 4 – Slightly non-stationary environment, multiple campaigns ✅
-- **Environment:** `AdversarialMultiCampaignEnv(mode='shocks')` — same class as Requirement 3, reparameterised for FEW, LONG intervals (`block_size=2000` → 5 intervals over `T=10000`).
-- **Two new agents** (added to `utils/agents.py`'s "Requirement 4" section): `SlidingWindowCombinatorialUCBAgent` (trailing window `W=2000`) and `CUSUMCombinatorialUCBAgent` (CUSUM change detector on the win indicator) — both subclass Requirement 2's `CombinatorialUCBAgent` directly.
-- **Compared against Requirement 3's `PrimalDualMultiCampaignAgent`** (same `budget_pacing`, `ogd_eta` re-tuned for this environment — same value found independently for both regimes).
-- **Benchmark:** the primary diagnostic is the *piecewise expected clairvoyant* (`compute_piecewise_expected_clairvoyant` in `utils/experiments.py`), not the dynamic/realised clairvoyant — see `docs/Req4_Linear_Regret_Baseline.tex` and `docs/Req4_Baseline_Code_Fix_Practical.tex` for why: the dynamic oracle's round-by-round foreknowledge inflates regret by a term that is linear in $T$ regardless of learner quality. OPT$^A$ (Requirement 3's own benchmark) and the dynamic oracle are also reported, as secondary/reference curves.
+---
 
-  | Agent | Regret vs Piecewise (primary) | Regret vs OPT$^A$ | Regret vs Prophet (reference) | Cumulative cost | Budget used |
-  |---|---|---|---|---|---|
-  | **CUSUM Combinatorial-UCB** | **1443.90** (best) | **644.55** | **2717.49** | 1598.91 / 1600 | 99.9% |
-  | Sliding-Window Combinatorial-UCB | 1532.01 | 732.66 | 2805.60 | 1595.52 / 1600 | 99.7% |
-  | Primal-Dual (Req 3, `budget_pacing=True`) | 1777.40 | 978.05 | 3050.99 | 1193.92 / 1600 | 74.6% |
+## Requirements
 
-  The ranking (CUSUM < Sliding-Window < Primal-Dual) is identical under all three benchmarks. Primal-Dual's gap is driven by budget under-utilisation (74.6% spent vs ~99.8% for the other two) — `budget_pacing` fixes this cleanly at short horizons but only marginally at $T=10000$, an unresolved and explicitly documented "unexpected result". See `deliverables/req4_slightly_nonstationary.ipynb` for the full discussion.
+### Requirement 1 – Single campaign, stochastic environment
+
+**Environment:** `SingleCampaignEnv` — first-price auction, competing bids i.i.d. from Beta(k, 1) where k is the number of competitors.
+
+**Agents:**
+
+- **UCB1** (`UCB1BiddingAgent`) — budget-unaware; treats each bid level as a MAB arm; maximises cumulative utility with no budget constraint.
+- **UCB-like** (`UCBLikeBiddingAgent`) — budget-aware; maintains UCB on reward and LCB on cost, solves a 1-campaign LP at each round to find the budget-feasible randomised bid.
+
+**Two budget scenarios** (deliberately different within Requirement 1, to illustrate the role of the constraint):
+
+| Scenario | B | ρ | Effect |
+|----------|------|------|--------|
+| Generous | 1600 | 0.16 | Constraint non-binding; both agents converge to the same bid |
+| Tight | 400 | 0.04 | Constraint binding; UCB1 overspends, UCB-like respects the budget |
+
+**Clairvoyant benchmark:** LP optimum over the true win probabilities with the per-round budget ρ as cost constraint.
+
+---
+
+### Requirement 2 – Multiple campaigns, stochastic environment
+
+**Environment:** `MultiCampaignEnv` — N=4 independent first-price auctions with a shared budget B=1600 and a conflict graph (campaigns 0–1 and 2–3 are pairwise exclusive).
+
+**Agent:** `CombinatorialUCBAgent` — extends the single-campaign UCB-like approach to N campaigns.  At each round it builds UCB/LCB confidence bounds per (campaign, bid) cell, solves a joint LP over all N campaigns subject to the shared budget and conflict-graph constraints, then samples a feasible joint action.
+
+**Clairvoyant benchmark:** `compute_clairvoyant_multi` — LP optimum over the true win probabilities with the shared budget constraint and conflict edges.
+
+---
+
+### Requirement 3 – Best-of-both-worlds, multiple campaigns
+
+**Environment:** same N, B, T, values, bid grid, and conflict graph as Requirement 2.  Two sub-experiments:
+
+- **Stochastic:** `MultiCampaignEnv` (i.i.d. competing bids).
+- **Adversarial / non-stationary:** `AdversarialMultiCampaignEnv(mode='drift')` — the mean of the highest competing bid drifts sinusoidally, changing every round.
+
+**Agent:** `PrimalDualMultiCampaignAgent` — one Hedge (exponential-weights) regret minimiser per campaign coupled to a shared OGD dual variable λ for the budget.  The Lagrangian is:
+
+$$L(\mathbf{x}, \lambda) = \sum_{i=1}^N v_i \langle \mathbf{x}_i, \mathbf{w}_{i,t} \rangle - \lambda \left(\sum_{i} \langle \mathbf{x}_i, \mathbf{c}_{i,t} \rangle - \rho\right)$$
+
+Key settings: `budget_pacing=True` (adaptive ρ_t = remaining_budget / remaining_rounds), `ogd_eta=0.017`.
+
+**Clairvoyant benchmark:**
+
+- **Stochastic experiment:** `compute_clairvoyant_multi` on the true stationary win probabilities.
+- **Adversarial experiment:** OPT^A — best *fixed* distribution in hindsight, computed per trial from `env.empirical_win_probabilities()` fed into `compute_clairvoyant_multi`.  This is the benchmark against which Hedge + OGD has a provable sublinear pseudo-regret guarantee in both stochastic and adversarial settings.
+
+The dynamic (prophet) clairvoyant — which knows every realised competing bid m_t — is **not** used as the adversarial benchmark because it inflates regret by a Jensen-gap term that is linear in T regardless of learner quality, making it impossible to achieve sublinear regret against it in a first-price auction.
+
+---
+
+### Requirement 4 – Slightly non-stationary environment, multiple campaigns
+
+**Environment:** `AdversarialMultiCampaignEnv(mode='shocks')` — same N, B, T, values, bid grid, and conflict graph as Requirements 2–3, reparameterised for piecewise-stationary dynamics: 5 blocks of length 2 000, with the competing-bid distribution changing at each block boundary.
+
+**Agents:**
+
+- `SlidingWindowCombinatorialUCBAgent` — trailing window W=2 000 (one block length); discards observations older than W rounds.
+- `CUSUMCombinatorialUCBAgent` — per-cell Page (1954) CUSUM change detector on the win indicator; resets statistics when a change is detected.
+- `PrimalDualMultiCampaignAgent` — Requirement 3 agent included as a reference point (`budget_pacing=True`, `ogd_eta=0.017`).
+
+**Benchmark hierarchy:**
+
+| Tier | Description | Function |
+|------|-------------|----------|
+| PRIMARY | Piecewise expected clairvoyant — knows block boundaries and true per-block distributions; does **not** know individual m_t realisations | `compute_piecewise_expected_clairvoyant` |
+| SECONDARY | OPT^A — best fixed distribution in hindsight (continuity with Req 3) | `compute_clairvoyant_multi` + `empirical_win_probabilities` |
+| REFERENCE | Dynamic/prophet — knows every realised m_t; inflates regret by a linear-in-T Jensen gap | `compute_clairvoyant_dynamic_multi` |
+
+The piecewise expected clairvoyant is the natural target for SW-UCB and CUSUM-UCB because it corresponds to the best policy a learner that knows only block boundaries (not individual m_t) could achieve.
+
+**Results (mean over 20 trials, T=10 000):**
+
+| Agent | Regret vs Piecewise | Regret vs OPT^A | Regret vs Prophet |
+|-------|---------------------|-----------------|-------------------|
+| CUSUM Combinatorial-UCB | **1 443.90** | **644.55** | **2 717.49** |
+| Sliding-Window Combinatorial-UCB | 1 532.01 | 732.66 | 2 805.60 |
+| Primal-Dual (Req 3) | 1 777.40 | 978.05 | 3 050.99 |
+
+The ranking is identical under all three benchmarks. Primal-Dual's higher regret is driven by budget under-utilisation (~74.6% of B spent vs ~99.8% for the other two).
 
 ---
 
 ## Running
 
-Open any notebook and run all cells. Each notebook calls a single function from `utils/`:
+Open any notebook and run all cells. Each notebook calls a single entry point:
 
 ```python
-# req1_single_campaign.ipynb
-from utils.run_req1 import run_req1
-run_req1()
-
-# req2_multi_campaign.ipynb
-from utils.run_req2 import run_req2
-run_req2()
-
-# req3_best_of_both_world.ipynb
-from utils.run_req3 import run_req3
-run_req3()
-
-# req4_slightly_nonstationary.ipynb
-from utils.run_req4 import run_req4
-run_req4()
+from utils.run_req1 import run_req1; run_req1()
+from utils.run_req2 import run_req2; run_req2()
+from utils.run_req3 import run_req3; run_req3()
+from utils.run_req4 import run_req4; run_req4()
 ```
 
-Plots are saved by requirement in `outputs/req1/`, `outputs/req2/`, `outputs/r3/`, `outputs/r4/`.
-PDF reports live in `docs/reports/`. Results are pickled to `data/picklefiles/`.
+Plots are saved under `outputs/req1/`, `outputs/req2/`, `outputs/r3/`, `outputs/r4/`.  
+Pickled results land in `data/picklefiles/`.
+
+### Precomputing the dynamic clairvoyant (optional)
+
+The dynamic/prophet LP takes 5–30 s per trial. To cache it once and skip the solve on subsequent runs:
+
+```bash
+# Requirement 3 (all adversarial modes)
+cd utils/
+python precomputed_clairvoyant.py
+
+# Requirement 4 (shocks mode only)
+python -m utils.precompute_clairvoyant_req4
+```
+
+If the cache is absent, the reference (prophet) curve is simply omitted; the primary and secondary benchmarks do not require it.

@@ -1,25 +1,31 @@
 """
 agents.py
 ---------
-Bidding agents for Requirements 1 and 2.
-
-Every class mirrors the corresponding notebook implementation as closely
-as possible.
+Bidding agents for all four project requirements.
 
 Requirement 1
 -------------
-UCB1BiddingAgent      ← NB01 cell 39  (UCB1Agent, range=value)
-UCBLikeBiddingAgent   ← NB07 cell 40  (UCBLikeAgent, range=value)
+UCB1BiddingAgent       Budget-unaware UCB1 baseline.
+UCBLikeBiddingAgent    Budget-aware UCB with LP oracle.
 
 Requirement 2
 -------------
-CombinatorialUCBAgent ← NB09 cell 30  (UCBMatchingAgent) adapted for
-                        N campaigns with a shared budget LP oracle
-                        instead of linear_sum_assignment
+CombinatorialUCBAgent  Multi-campaign UCB with shared budget and conflict graph.
+
+Requirement 3
+-------------
+_HedgeAgent                     Per-campaign Hedge regret minimiser (internal).
+PrimalDualMultiCampaignAgent    Best-of-both-worlds primal-dual agent.
+
+Requirement 4
+-------------
+SlidingWindowCombinatorialUCBAgent  Combinatorial UCB with sliding-window statistics.
+CUSUMCombinatorialUCBAgent          Combinatorial UCB with per-cell CUSUM change detection.
 """
 
 import logging
 import pickle
+from collections import deque as _deque
 from pathlib import Path
 from typing import Optional
 
@@ -40,29 +46,32 @@ class UCB1BiddingAgent:
     """
     UCB1 applied to the bid set, ignoring the budget constraint.
 
-    Mirrors NB01 cell 39 (UCB1Agent) with range = value, following
-    NB07 cell 43 where range=my_valuation is used.
+    Tracks average rewards per bid and uses an upper confidence bound to
+    balance exploration and exploitation. This agent is budget-unaware and
+    serves as a baseline for Requirement 1.
 
     Parameters
     ----------
-    K : int     number of available bids
-    T : int     time horizon
-    range : float   reward range; set to value (NB07 cell 43)
+    K : int
+        Number of available bids.
+    T : int
+        Time horizon.
+    range : float
+        Reward range; set to the campaign value.
     """
 
-    def __init__(self, K, T, range=1):
-        # NB01 cell 39 – field names kept identical
+    def __init__(self, K: int, T: int, range: float = 1.0) -> None:
         self.K = K
         self.T = T
         self.range = range
-        self.a_t = None
+        self.a_t: Optional[int] = None
         self.average_rewards = np.zeros(K)
         self.N_pulls = np.zeros(K)
         self.t = 0
         logger.info("UCB1BiddingAgent | K=%d T=%d range=%.2f", K, T, range)
 
-    def pull_arm(self):
-        """NB01 cell 39: pull each arm once first, then follow UCB."""
+    def pull_arm(self) -> int:
+        """Pull each arm once first, then follow UCB indices."""
         if self.t < self.K:
             self.a_t = self.t
         else:
@@ -71,18 +80,15 @@ class UCB1BiddingAgent:
             self.a_t = int(np.argmax(ucbs))
         return self.a_t
 
-    def update(self, r_t):
-        """
-        NB01 cell 39 update: incremental mean on reward only.
-        UCB1 does not track cost.
-        """
+    def update(self, r_t: float) -> None:
+        """Incremental mean update on reward. Does not track cost."""
         self.N_pulls[self.a_t] += 1
         self.average_rewards[self.a_t] += (
             (r_t - self.average_rewards[self.a_t]) / self.N_pulls[self.a_t]
         )
         self.t += 1
 
-    def save(self, name="ucb1_bidding"):
+    def save(self, name: str = "ucb1_bidding") -> Path:
         path = DATA_DIR / f"{name}.pkl"
         with open(path, "wb") as f:
             pickle.dump(self, f)
@@ -98,26 +104,29 @@ class UCBLikeBiddingAgent:
     """
     Budget-aware bidding agent for a single campaign.
 
-    Budget-aware extension of UCB1.  The agent is optimistic on utility
-    through UCB estimates, and handles the budget through an LP over
-    distributions on bids.  Unlike the original notebook fallback, the LP is
-    always attempted: negative/over-large confidence artifacts are not allowed
-    to bypass the budget constraint.
+    At each round, solves an LP over bid distributions to find the randomised
+    strategy that maximises UCB-optimistic expected utility subject to the
+    per-round budget constraint rho = B/T. Cost is estimated via empirical
+    means rather than an LCB to avoid spurious zero-cost artifacts during
+    early exploration.
 
     Parameters
     ----------
-    K : int     number of bids (after restricting to bids <= value)
-    B : float   total budget
-    T : int     time horizon
-    range : float   reward range = value  (NB07 cell 43)
+    K : int
+        Number of bids (after restricting to bids <= value).
+    B : float
+        Total budget.
+    T : int
+        Time horizon.
+    range : float
+        Reward range; set to the campaign value.
     """
 
-    def __init__(self, K, B, T, range=1):
-        # NB07 cell 40 – field names kept identical
+    def __init__(self, K: int, B: float, T: int, range: float = 1.0) -> None:
         self.K = K
         self.T = T
         self.range = range
-        self.a_t = None          # index, not the actual bid
+        self.a_t: Optional[int] = None
         self.avg_f = np.zeros(K)
         self.avg_c = np.zeros(K)
         self.N_pulls = np.zeros(K)
@@ -129,16 +138,16 @@ class UCBLikeBiddingAgent:
             K, T, B, self.rho, range,
         )
 
-    def pull_arm(self):
-        """Budget stop → init phase → LP sampling.
-
-        The objective remains UCB-like on utility.  The budget constraint uses
-        the empirical expected cost, rather than a lower confidence bound that
-        can collapse to zero for many arms and make the LP effectively
-        budget-unaware in early rounds.
+    def pull_arm(self) -> int:
         """
-        # All admissible bids are <= value <= 1 in this project, so when the
-        # remaining budget is below 1 we stop bidding safely with bid index 0.
+        Select a bid: budget stop → init phase → LP sampling.
+
+        The LP maximises UCB-optimistic utility subject to the empirical
+        expected cost staying within rho. If the LP fails numerically, the
+        fallback selects the best feasible bid deterministically.
+        """
+        # All admissible bids are <= value <= 1, so budget < 1 means no
+        # affordable bid remains; return the abstain action (index 0).
         if self.budget < 1:
             self.a_t = 0
             return 0
@@ -148,31 +157,27 @@ class UCBLikeBiddingAgent:
             self.a_t = self.t
             return self.a_t
 
-        # Time-dependent confidence, as allowed by the course slides.  This
-        # avoids making the early confidence radius depend on a large fixed T.
+        # Time-dependent confidence radius to avoid over-optimism at early t.
         beta = self.range * np.sqrt(
             2 * np.log(max(self.t, 2)) / self.N_pulls
         )
         f_ucbs = np.minimum(self.range, self.avg_f + beta)
 
-        # Budget-aware practical constraint: use the empirical expected cost.
-        # This avoids artificial zero costs caused by avg_c - beta < 0.
+        # Use empirical expected cost in the budget constraint to avoid
+        # negative LCB values that would make the LP budget-unaware.
         cost_for_constraint = np.maximum(0.0, self.avg_c)
 
         gamma_t = self._compute_opt(f_ucbs, cost_for_constraint)
         self.a_t = int(np.random.choice(self.K, p=gamma_t))
         return self.a_t
 
-    def _compute_opt(self, f_ucbs, cost_for_constraint):
-        """Solve the budget-aware LP over distributions on bids.
+    def _compute_opt(self, f_ucbs: np.ndarray, cost_for_constraint: np.ndarray) -> np.ndarray:
+        """
+        Solve the budget-aware LP over distributions on bids.
 
-        max_gamma sum_b gamma_b f_ucb[b]
-        s.t.      sum_b gamma_b cost[b] <= rho
-                  sum_b gamma_b = 1, gamma_b >= 0
-
-        scipy.linprog minimizes, so the objective is -f_ucbs.  If the LP fails
-        numerically, fall back to the best utility among empirically feasible
-        bids; if none is feasible, use the lowest-cost bid.
+            max_gamma  sum_b gamma_b f_ucb[b]
+            s.t.       sum_b gamma_b cost[b] <= rho
+                       sum_b gamma_b = 1,  gamma_b >= 0
         """
         res = optimize.linprog(
             -f_ucbs,
@@ -199,8 +204,8 @@ class UCBLikeBiddingAgent:
             gamma[int(np.argmin(cost_for_constraint))] = 1.0
         return gamma
 
-    def update(self, f_t, c_t):
-        """NB07 cell 40: incremental mean update for both f and c."""
+    def update(self, f_t: float, c_t: float) -> None:
+        """Incremental mean update for both utility and cost."""
         self.N_pulls[self.a_t] += 1
         n = self.N_pulls[self.a_t]
         self.avg_f[self.a_t] += (f_t - self.avg_f[self.a_t]) / n
@@ -208,7 +213,7 @@ class UCBLikeBiddingAgent:
         self.budget -= c_t
         self.t += 1
 
-    def save(self, name="ucblike_bidding"):
+    def save(self, name: str = "ucblike_bidding") -> Path:
         path = DATA_DIR / f"{name}.pkl"
         with open(path, "wb") as f:
             pickle.dump(self, f)
@@ -224,53 +229,59 @@ class CombinatorialUCBAgent:
     """
     Combinatorial UCB for N campaigns with a shared budget and a conflict graph.
 
-    Structure mirrors UCBMatchingAgent (NB09 cell 30):
-      - avg_f[i,k], avg_c[i,k], N_pulls[i,k] track each (campaign, bid) pair
-      - unexplored arms get large_value = (1 + sqrt(2*log(T)/1))*10  (NB09 cell 30)
-      - oracle = LP (instead of linear_sum_assignment) over feasible joint
-        actions to handle the shared budget and conflict graph constraints
-      - update receives per-campaign utilities and costs (semi-bandit feedback
-        analogous to NB09 cell 30's per-edge reward)
-
-    The LP oracle extends the single-campaign UCBLikeAgent LP (NB07 cell 40)
-    to multiple campaigns:
+    Maintains per-(campaign, bid) statistics and at each round solves an LP
+    over all round-feasible joint bid vectors to find the optimal randomised
+    strategy subject to the shared budget constraint:
 
         max  sum_a p_a * UCB_f(a)
         s.t. sum_a p_a * empirical_cost(a) <= rho  [shared budget]
-             sum_a p_a = 1                         [distribution over actions]
+             sum_a p_a = 1                          [valid distribution]
              p_a >= 0
 
-    Every joint action a is built so that it contains at most one bid per
-    campaign and never contains both endpoints of a conflict edge.  This makes
-    incompatibility constraints hold in every realised round, not only in
-    expectation through marginal probabilities.
+    Each joint action a is a bid vector that contains at most one bid per
+    campaign and never places bids on both endpoints of any conflict edge.
+    Budget cost uses empirical means to avoid spurious zero-cost artifacts
+    from negative LCB values during early exploration.
 
     Parameters
     ----------
-    N : int                     number of campaigns
-    Ks : list[int]              number of bids per campaign
-    T : int                     time horizon
-    budget : float              total shared budget B
-    values : list[float]        per-campaign values (used for range)
-    conflict_edges : list[(i,j)]
+    N : int
+        Number of campaigns.
+    Ks : list[int]
+        Number of bids per campaign.
+    T : int
+        Time horizon.
+    budget : float
+        Total shared budget B.
+    values : list[float]
+        Per-campaign values (used for UCB clipping range).
+    conflict_edges : list[tuple[int, int]], optional
+        Pairs of campaigns that cannot both receive bids in the same round.
     """
 
-    def __init__(self, N, Ks, T, budget, values, conflict_edges=None):
+    def __init__(
+        self,
+        N: int,
+        Ks: list[int],
+        T: int,
+        budget: float,
+        values: list[float],
+        conflict_edges: list[tuple[int, int]] | None = None,
+    ) -> None:
         self.N = N
-        self.Ks = Ks            # list of K_i
+        self.Ks = Ks
         self.T = T
         self.budget = budget
         self.values = np.asarray(values)
         self.rho = budget / T
         self.conflict_edges = conflict_edges or []
 
-        # NB09 cell 30 field names adapted for 2-D (campaign × bid)
         self.avg_f   = [np.zeros(Ks[i]) for i in range(N)]
         self.avg_c   = [np.zeros(Ks[i]) for i in range(N)]
         self.N_pulls = [np.zeros(Ks[i]) for i in range(N)]
 
         self.joint_actions = self._build_joint_actions()
-        self.A_t = None     # list of bid indices, one per campaign
+        self.A_t: Optional[list] = None
         self.t = 0
 
         logger.info(
@@ -278,16 +289,14 @@ class CombinatorialUCBAgent:
             N, Ks, T, budget, self.rho, self.conflict_edges,
         )
 
-    def pull_arm(self):
+    def pull_arm(self) -> list:
         """
-        Compute UCB/LCB matrices, run LP oracle, sample one joint action.
+        Compute UCB matrices, run the LP oracle, and sample one joint action.
 
-        Mirrors NB09 cell 30's pull_arm:
-          - unexplored arms get large_value = (1 + sqrt(2*log(T)/1))*10
-          - explored arms get mean + confidence interval
-        Then LP replaces linear_sum_assignment as the combinatorial oracle.
+        Unexplored arms receive the maximum admissible utility as their
+        optimistic estimate. Explored arms use empirical mean plus a
+        time-dependent confidence radius.
         """
-        # NB07 cell 40: budget stop
         if self.budget < 1:
             self.A_t = [-1] * self.N
             return self.A_t
@@ -300,16 +309,11 @@ class CombinatorialUCBAgent:
             pulls = np.maximum(self.N_pulls[i], 1)
             beta_i = range_i * np.sqrt(2 * np.log(max(self.t, 2)) / pulls)
 
-            # Unexplored pairs receive the largest admissible utility optimism
-            # for campaign i.  Explored pairs use a clipped UCB.
             f_ucb_i = np.where(
                 self.N_pulls[i] == 0,
                 range_i,
                 np.minimum(range_i, self.avg_f[i] + beta_i),
             )
-
-            # Use empirical cost in the budget constraint.  Unexplored pairs
-            # are optimistic with cost 0, but no negative LCB can bypass the LP.
             cost_i = np.maximum(0.0, self.avg_c[i])
             f_ucb_list.append(f_ucb_i)
             cost_list.append(cost_i)
@@ -320,18 +324,18 @@ class CombinatorialUCBAgent:
 
         return self.A_t
 
-    def _build_joint_actions(self):
-        """Enumerate all round-feasible bid vectors, including abstentions."""
+    def _build_joint_actions(self) -> list:
+        """Enumerate all round-feasible bid vectors via backtracking."""
         actions = []
         current = [-1] * self.N
-        active = set()
+        active: set = set()
         edge_set = {tuple(sorted(edge)) for edge in self.conflict_edges}
 
-        def compatible(campaign):
+        def compatible(campaign: int) -> bool:
             return all(tuple(sorted((campaign, other))) not in edge_set
                        for other in active)
 
-        def backtrack(i):
+        def backtrack(i: int) -> None:
             if i == self.N:
                 actions.append(tuple(current))
                 return
@@ -350,7 +354,11 @@ class CombinatorialUCBAgent:
         backtrack(0)
         return actions
 
-    def _action_scores(self, f_ucb_list, cost_list):
+    def _action_scores(
+        self,
+        f_ucb_list: list[np.ndarray],
+        cost_list: list[np.ndarray],
+    ) -> tuple[np.ndarray, np.ndarray]:
         utilities = np.zeros(len(self.joint_actions))
         costs = np.zeros(len(self.joint_actions))
         for idx, action in enumerate(self.joint_actions):
@@ -360,13 +368,17 @@ class CombinatorialUCBAgent:
                     costs[idx] += cost_list[i][k]
         return utilities, costs
 
-    def _solve_lp(self, f_ucb_list, cost_list):
-        """Joint LP oracle over round-feasible joint actions.
+    def _solve_lp(
+        self,
+        f_ucb_list: list[np.ndarray],
+        cost_list: list[np.ndarray],
+    ) -> np.ndarray:
+        """
+        Joint LP oracle over round-feasible joint actions.
 
-        The LP is always attempted.  If it fails numerically, the fallback is
-        budget-safe with respect to the same empirical-cost vector: choose the
-        best feasible joint action, or the minimum-cost joint action if none is
-        feasible.
+        Falls back to the best empirically feasible joint action if the LP
+        fails numerically; if none is feasible, selects the minimum-cost
+        joint action.
         """
         f_actions, c_actions = self._action_scores(f_ucb_list, cost_list)
 
@@ -396,10 +408,14 @@ class CombinatorialUCBAgent:
             gamma[int(np.argmin(c_actions))] = 1.0
         return gamma
 
-    def update(self, utilities, costs):
+    def update(self, utilities: np.ndarray, costs: np.ndarray) -> None:
         """
-        NB09 cell 30 update pattern: update all arms in A_t (semi-bandit).
-        utilities, costs: np.ndarray shape (N,)
+        Semi-bandit update: update statistics for every arm pulled this round.
+
+        Parameters
+        ----------
+        utilities : np.ndarray shape (N,)
+        costs     : np.ndarray shape (N,)
         """
         for i, k in enumerate(self.A_t):
             if k < 0:
@@ -411,7 +427,7 @@ class CombinatorialUCBAgent:
         self.budget -= costs.sum()
         self.t += 1
 
-    def save(self, name="combinatorial_ucb"):
+    def save(self, name: str = "combinatorial_ucb") -> Path:
         path = DATA_DIR / f"{name}.pkl"
         with open(path, "wb") as f:
             pickle.dump(self, f)
@@ -425,31 +441,38 @@ class CombinatorialUCBAgent:
 
 class _HedgeAgent:
     """
-    Hedge (exponential weights) with full feedback.
+    Hedge (exponential weights) regret minimiser with full feedback.
 
-    Direct port of HedgeAgent from NB08 cell 13, extended to work with
-    any reward range (not just [0,1]).
+    Maintains a weight vector over K arms updated multiplicatively after each
+    round. The distribution returned by get_distribution() is the normalised
+    weight vector.
 
     Parameters
     ----------
-    K : int         number of arms
-    eta : float     learning rate  (NB08: sqrt(log(K)/T))
+    K : int
+        Number of arms.
+    eta : float
+        Learning rate.
     """
 
-    def __init__(self, K: int, eta: float):
+    def __init__(self, K: int, eta: float) -> None:
         self.K   = K
         self.eta = eta
         self.weights = np.ones(K, dtype=float)
 
     def get_distribution(self) -> np.ndarray:
-        """Return normalised probability vector (shape K)."""
+        """Return the normalised probability vector (shape K)."""
         w = self.weights
         return w / w.sum()
 
     def update(self, loss_t: np.ndarray) -> None:
         """
-        Multiplicative-weights update.  loss_t must be in [0, 1].
-        NB08 cell 13: weights *= exp(-eta * loss_t)
+        Multiplicative-weights update.
+
+        Parameters
+        ----------
+        loss_t : np.ndarray shape (K,)
+            Per-arm losses, must be in [0, 1].
         """
         self.weights *= np.exp(-self.eta * loss_t)
 
@@ -458,79 +481,92 @@ class PrimalDualMultiCampaignAgent:
     """
     Best-of-both-worlds bidding agent for N campaigns.
 
-    Implements the primal-dual framework from NB08 (OGDHedgeSingleKnapsackAgent),
-    extended to multiple campaigns with a shared budget constraint and a conflict
-    graph.
+    Implements the primal-dual framework with one Hedge regret minimiser per
+    campaign (primal) and a shared OGD step on the Lagrange multiplier for
+    the budget constraint (dual). The agent achieves sublinear regret against
+    the best fixed bid distribution in hindsight (OPT^A) in both stochastic
+    and adversarial environments — the "best-of-both-worlds" property.
 
     Architecture
     ------------
-    Primal  – one Hedge agent per campaign (full feedback => we observe m_t
-              and can compute counterfactual utilities for every bid k)
-    Dual    – one shared OGD variable lambda in [0, 1/rho] for the shared budget
+    Primal  -- one Hedge agent per campaign. Observing m_t each round allows
+               counterfactual utilities to be computed for all bids without
+               importance weighting (full feedback).
+    Dual    -- one shared Lagrange multiplier lambda in [0, 1/rho] via OGD.
 
-    Lagrangian (NB08)
-    -----------------
-      L(x, lambda) = sum_{i,k} x_{ik} (f_{t,ik} - lambda * c_{t,ik}) + lambda*rho
+    Lagrangian
+    ----------
+        L(x, lambda) = sum_{i,k} x_{ik} (f_{t,ik} - lambda * c_{t,ik}) + lambda * rho
 
-    where  f_{t,ik} = (v_i - b_{ik}) * I[b_{ik} >= m_{t,i}]
-           c_{t,ik} = b_{ik}          * I[b_{ik} >= m_{t,i}]
+    where f_{t,ik} = (v_i - b_{ik}) * 1[b_{ik} >= m_{t,i}]
+          c_{t,ik} = b_{ik}         * 1[b_{ik} >= m_{t,i}]
 
-    Primal loss for Hedge (rescaled to [0,1] -- NB08 pattern)
-    ---------------------------------------------------------
-      loss^P_{t,ik} = (lambda_max - (f_{t,ik} - lambda_t * c_{t,ik}))
-                      / (1 + lambda_max)
+    Hedge loss normalisation (mapped to [0, 1])
+    -------------------------------------------
+        loss_{t,ik} = (v_i - (f_{t,ik} - lambda_t * c_{t,ik})) / (v_i + lambda_t * max_bid_i)
 
-    This maps the reward range [-lambda_max, 1] linearly onto [0, 1].
+    Using the current lambda_t in the denominator (rather than lambda_max)
+    keeps the loss signal meaningful as lambda rises during the run.
 
-    Dual OGD update (NB08, modified for conflict graph)
-    ----------------------------------------------------
-      lambda_{t+1} = clip[0, 1/rho](lambda_t - eta_D * (rho - sum_i c_{t,i}))
+    Dual OGD update
+    ---------------
+        lambda_{t+1} = clip[0, 1/rho](lambda_t - eta_D * (rho_t - sum_i c_{t,i}))
 
-    We use the realized total cost sum_i c_{t,i} (an unbiased estimator of the
-    expected cost) instead of E_{x_t}[c_t] computed bid-by-bid.  Reason: the
-    realized cost already incorporates the suppressions made by the conflict
-    graph in MultiCampaignEnv.round, while the bid-by-bid expectation would
-    ignore them.  Trade-off: higher gradient variance, mitigated by eta_D = 1/sqrt(T).
-
-    Full feedback
-    -------------
-    By observing m_t (highest competitor bid per campaign) we reconstruct
-    f_{t,ik} and c_{t,ik} for *all* bids without sampling -- unlike bandit
-    feedback, which would require importance-weighted estimates.
+    where rho_t = B/T (fixed) or remaining_budget/remaining_rounds (budget pacing).
 
     Conflict graph
     --------------
-    Conflicts are enforced by the environment (MultiCampaignEnv.round).
-    The Hedge agents use per-campaign marginal rewards (treating each campaign
-    independently), which is the standard simplification when decomposing
-    the primal minimizer across campaigns.
+    After independent sampling from each campaign's Hedge distribution,
+    the lower-utility campaign in each conflicting pair is forced to abstain.
+    The same tie-breaking rule (higher utility wins, ties go to lower index)
+    is applied when computing counterfactual rewards for Hedge.
+
+    Dual gradient signal
+    --------------------
+    The OGD gradient uses the realised total cost c_t.sum() rather than the
+    sum of per-campaign expected costs E[c_i | x_t]. This correctly accounts
+    for conflict suppression already applied by the environment; using the
+    per-campaign expectation would double-count costs for conflicting pairs,
+    causing lambda to overshoot and Hedge to converge to the no-bid arm.
 
     Parameters
     ----------
-    N            : int             number of campaigns
-    Ks           : list[int]       K_i = number of bids in campaign i
-    bid_sets     : list[ndarray]   actual bid values per campaign
-    T            : int             time horizon
-    budget       : float           total shared budget B
-    values       : list[float]     per-campaign valuations v_i
-    conflict_edges : list[(i,j)]   optional conflict graph
-    hedge_eta    : float           Hedge LR  (default sqrt(log K_max / T))
-    ogd_eta      : float           OGD LR    (default 1 / sqrt(T))
+    N : int
+        Number of campaigns.
+    Ks : list[int]
+        Number of bids per campaign.
+    bid_sets : list[np.ndarray]
+        Actual bid values per campaign.
+    T : int
+        Time horizon.
+    budget : float
+        Total shared budget B.
+    values : list[float]
+        Per-campaign valuations v_i.
+    conflict_edges : list[tuple[int, int]], optional
+        Pairs of campaigns that cannot both bid in the same round.
+    hedge_eta : float, optional
+        Hedge learning rate. Default: sqrt(log(K_max) / T).
+    ogd_eta : float, optional
+        OGD learning rate for lambda. Default: 1 / sqrt(T).
+    budget_pacing : bool
+        If True, uses adaptive rho_t = remaining_budget / remaining_rounds
+        instead of the fixed rho = B/T. Default: False.
     """
 
     def __init__(
         self,
         N: int,
-        Ks: list,
-        bid_sets: list,
+        Ks: list[int],
+        bid_sets: list[np.ndarray],
         T: int,
         budget: float,
-        values: list,
-        conflict_edges=None,
-        hedge_eta: Optional[float] = None,
-        ogd_eta: Optional[float] = None,
+        values: list[float],
+        conflict_edges: list[tuple[int, int]] | None = None,
+        hedge_eta: float | None = None,
+        ogd_eta: float | None = None,
         budget_pacing: bool = False,
-    ):
+    ) -> None:
         self.N  = N
         self.Ks = Ks
         self.bid_sets      = [np.asarray(bs) for bs in bid_sets]
@@ -539,52 +575,37 @@ class PrimalDualMultiCampaignAgent:
         self.rho           = budget / T
         self.values        = np.asarray(values, dtype=float)
         self.conflict_edges = conflict_edges or []
-        # Budget pacing (extension beyond NB08): when True, the dual OGD target
-        # uses rho_t = remaining_budget / remaining_rounds instead of the fixed
-        # rho = B/T.  This self-corrects the spending pace so the budget lasts
-        # to T (no early-exhaustion regret tail) and unused budget is spent.
-        # When False the agent uses the exact NB08 fixed-rho gradient.
+        # Budget pacing: when True, the OGD target uses rho_t =
+        # remaining_budget / remaining_rounds instead of fixed rho = B/T,
+        # which self-corrects the spending pace throughout the horizon.
         self.budget_pacing = budget_pacing
-        # Normalised edge set: frozenset for symmetric, O(1) lookup
         self._edge_set = {frozenset(e) for e in self.conflict_edges}
 
-        # --- Learning rates (NB08 default formulas) ------------------------
         K_max = max(Ks)
         self.hedge_eta = float(hedge_eta) if hedge_eta is not None else float(
             np.sqrt(np.log(max(K_max, 2)) / T)
         )
         self.ogd_eta = float(ogd_eta) if ogd_eta is not None else 1.0 / np.sqrt(T)
-        #self.ogd_eta= 0.022
-        
-        # --- Reward range for loss normalisation ---------------------------
-        # primal reward in [-1/rho, 1]  =>  total range = 1 + 1/rho
+
         self._lmbd_max    = 1.0 / self.rho
         self._reward_range = 1.0 + self._lmbd_max
 
-        # --- Primal: one Hedge per campaign --------------------------------
         self.hedge_agents = [
             _HedgeAgent(Ks[i], self.hedge_eta) for i in range(N)
         ]
 
-        # --- Dual: shared Lagrange multiplier ------------------------------
-        # Start at 0: Hedge first learns to maximise utility unconstrained,
-        # then lambda rises until the budget constraint is met.
-        # NB08 uses lmbd=1 which works for rho≈0.4 (lmbd_max=2.5), but with
-        # rho=0.05 (lmbd_max=20) starting at 1 immediately penalises costs
-        # so heavily that Hedge converges to no-bid before lambda can correct.
+        # Lambda starts at 0 so Hedge first learns to maximise utility
+        # unconstrained; it rises as the budget constraint becomes active.
         self.lmbd = 0.0
 
-        # --- State ---------------------------------------------------------
-        self.A_t: Optional[list] = None          # sampled actions (length N)
-        self.x_t     = None          # distributions at current round
+        self.A_t: Optional[list] = None
+        self.x_t: Optional[list] = None
         self.t       = 0
         self.N_pulls = [np.zeros(Ks[i]) for i in range(N)]
 
-        # --- History tracking (for Requirement 3 plots, NB08-style) --------
-        # NB08 plots: lambda trajectory, cumulative costs, regret over time
-        self.lmbds_history = []      # lambda_t at each round
-        self.cost_history  = []      # total cost spent at each round
-        self.utility_history = []    # total utility received at each round
+        self.lmbds_history:   list[float] = []
+        self.cost_history:    list[float] = []
+        self.utility_history: list[float] = []
 
         logger.info(
             "PrimalDualMultiCampaignAgent | N=%d Ks=%s T=%d B=%.1f "
@@ -597,10 +618,10 @@ class PrimalDualMultiCampaignAgent:
 
     def pull_arm(self) -> list:
         """
-        Get distributions from each Hedge, sample one bid per campaign,
-        and proactively resolve conflicts before sending to the environment.
+        Sample one bid per campaign from each Hedge distribution and resolve
+        conflicts proactively before returning the action vector.
         """
-        # 1. Budget depletion check
+        # 1. Budget depletion: abstain from all campaigns
         if self.budget < 1:
             self.A_t = [-1] * self.N
             self.x_t = []
@@ -610,23 +631,20 @@ class PrimalDualMultiCampaignAgent:
                 self.x_t.append(xi)
             return self.A_t
 
-        # 2. Ottieni le distribuzioni e campiona in modo indipendente
+        # 2. Sample independently from each Hedge distribution
         self.x_t = [self.hedge_agents[i].get_distribution() for i in range(self.N)]
         self.A_t = []
         for i in range(self.N):
             k = int(np.random.choice(self.Ks[i], p=self.x_t[i]))
             self.A_t.append(k)
-            
-        # 3. RISOLUZIONE PROATTIVA DEI CONFLITTI LATO AGENTE
-        # Se l'agente ha pescato azioni in conflitto, annulla quella con utilità minore
+
+        # 3. Resolve conflicts: the lower-utility campaign in each conflicting
+        #    pair abstains (ties broken in favour of the lower-index campaign).
         active = np.array(self.A_t) >= 0
         for (ei, ej) in self.conflict_edges:
             if active[ei] and active[ej]:
-                # Calcoliamo l'utilità potenziale massima (v - b)
                 u_i = self.values[ei] - self.bid_sets[ei][self.A_t[ei]]
                 u_j = self.values[ej] - self.bid_sets[ej][self.A_t[ej]]
-                
-                # Chi ha utilità minore si astiene (impostato a -1)
                 if u_i >= u_j:
                     self.A_t[ej] = -1
                     active[ej] = False
@@ -634,13 +652,13 @@ class PrimalDualMultiCampaignAgent:
                     self.A_t[ei] = -1
                     active[ei] = False
 
-        # 4. Aggiorna i contatori (N_pulls) SOLO per le azioni sopravvissute ai conflitti
+        # 4. Update pull counts only for campaigns that survived conflict resolution
         for i in range(self.N):
             if self.A_t[i] >= 0:
                 self.N_pulls[i][self.A_t[i]] += 1
 
         return self.A_t
-    
+
     # --- Update ------------------------------------------------------------
 
     def update(
@@ -650,15 +668,18 @@ class PrimalDualMultiCampaignAgent:
         m_t: np.ndarray,
     ) -> None:
         """
-        Full-feedback primal-dual update, conflict-graph aware.
+        Full-feedback primal-dual update.
 
-        When the budget is depleted, both updates are skipped: the agent is in
-        a terminal state, and updating lambda would produce artefacts in the
-        trajectory plot (lambda would drift downward as cost stays at 0).
+        When the budget is depleted, both primal and dual updates are skipped
+        to avoid artifacts in the lambda trajectory plot.
+
+        Parameters
+        ----------
+        f_t : np.ndarray shape (N,)   per-campaign utility this round
+        c_t : np.ndarray shape (N,)   per-campaign cost this round
+        m_t : np.ndarray shape (N,)   max competing bid per campaign (full feedback)
         """
-        # === Budget-depleted: terminal state, skip updates =================
         if self.budget < 1:
-            # Still log so plots stay aligned to round index
             self.lmbds_history.append(self.lmbd)
             self.cost_history.append(0.0)
             self.utility_history.append(0.0)
@@ -668,22 +689,15 @@ class PrimalDualMultiCampaignAgent:
         assert self.A_t is not None, "pull_arm() must be called before update()"
 
         # === Step 1: Dual OGD update =======================================
-        # Use the realised total cost c_t.sum() as the OGD gradient signal.
-        # The conflict graph is already enforced by the environment, so
-        # c_t.sum() is an unbiased estimate of the true expected cost under
-        # the joint distribution (including conflict suppression).  Using the
-        # sum of per-campaign expected costs E[c_i | x_t] instead overestimates
-        # the true cost by roughly 2x (both endpoints of each conflict edge are
-        # counted), which drives lambda far too high and makes Hedge converge
-        # to the no-bid arm.
+        # Use the realised total cost c_t.sum() as the gradient signal.
+        # This correctly accounts for conflict suppression already applied
+        # by the environment; using the sum of per-campaign expected costs
+        # would double-count costs for conflicting pairs and drive lambda too high.
         lmbd_before = self.lmbd
         realised_cost = float(c_t.sum())
 
-        # Dual target: fixed rho = B/T (NB08 cell 16/42) or, with pacing on,
-        # the adaptive rho_t = remaining_budget / remaining_rounds.  At this
-        # point self.budget is still the pre-spend residual and self.t has not
-        # been incremented yet, so (T - t) is exactly the number of rounds
-        # remaining (this one included).  No upper cap on rho_t by design.
+        # Dual target: fixed rho = B/T or, with budget pacing enabled,
+        # the adaptive rho_t = remaining_budget / remaining_rounds.
         if self.budget_pacing:
             rho_t = max(self.budget, 0.0) / max(self.T - self.t, 1)
         else:
@@ -696,10 +710,8 @@ class PrimalDualMultiCampaignAgent:
         ))
 
         # === Step 2: Primal Hedge update ===================================
-        # Pre-compute the "potential" utility of every other campaign j, i.e.
-        # the utility j would obtain with its sampled action a_j IF that bid
-        # beats the competitors (m_t[j]).  Needed to simulate the conflict
-        # graph in the counterfactual rewards used by Hedge.
+        # Pre-compute the potential utility of every campaign j — needed to
+        # apply the conflict-graph tie-breaking rule in counterfactual rewards.
         A_t = self.A_t
         potential_u = np.zeros(self.N)
         for j in range(self.N):
@@ -712,10 +724,9 @@ class PrimalDualMultiCampaignAgent:
             f_full_i = (self.values[i] - self.bid_sets[i]) * wins_i
             c_full_i = self.bid_sets[i] * wins_i
 
-            # --- Conflict graph applied to counterfactual rewards ---
-            # Mirrors MultiCampaignEnv.round: when both i and j win, the
-            # higher-utility campaign keeps the win (ties go to i, exactly
-            # like the env's `u_i >= u_j` rule).
+            # Apply the conflict graph to counterfactual rewards, mirroring
+            # the environment's round() rule: when both i and j would win,
+            # the higher-utility campaign keeps the win (ties go to i).
             for j in range(self.N):
                 if i == j:
                     continue
@@ -729,13 +740,11 @@ class PrimalDualMultiCampaignAgent:
 
             primal_reward = f_full_i - lmbd_before * c_full_i
 
-            # --- Loss normalisation to [0,1] -----------------------------
-            # Reward range at the CURRENT lambda:
-            #   upper bound = v_i  (bid wins, cost → 0)
-            #   lower bound = -lmbd_before * max_bid  (highest bid wins)
-            # Using lmbd_max in the denominator instead would compress all
-            # losses to ~[0, v_i/(v_i + lmbd_max*max_bid)] ≈ [0, 0.05],
-            # making Hedge updates negligibly small and preventing learning.
+            # Loss normalised to [0, 1] using the current lambda.
+            # Reward range: upper = v_i (win, cost → 0),
+            #               lower = -lmbd_before * max_bid (loss at highest bid).
+            # Using lmbd_max instead would compress all losses to ~0,
+            # making Hedge updates negligibly small.
             max_r   = self.values[i]
             range_r = max_r + lmbd_before * float(self.bid_sets[i].max())
             if range_r < 1e-10:
@@ -746,7 +755,6 @@ class PrimalDualMultiCampaignAgent:
             self.hedge_agents[i].update(loss_i)
 
         # === Budget tracking + history =====================================
-        realised_cost = float(c_t.sum())
         self.budget -= realised_cost
         self.lmbds_history.append(self.lmbd)
         self.cost_history.append(realised_cost)
@@ -766,45 +774,38 @@ class PrimalDualMultiCampaignAgent:
 # ---------------------------------------------------------------------------
 # Requirement 4 -- Combinatorial-UCB extended with a sliding window / CUSUM
 # ---------------------------------------------------------------------------
-#
-# Both classes subclass CombinatorialUCBAgent (Requirement 2, above) DIRECTLY
-# -- no workaround needed, since this file's CombinatorialUCBAgent is the
-# fixed version (empirical mean cost in the budget LP, no premature greedy
-# fallback -- see its own docstring / the "Budget-aware practical
-# constraint" comment in UCBLikeBiddingAgent above). Only the STATISTICS
-# feeding the LP change (windowed / since-last-reset instead of
-# full-history); the joint-action enumeration, LP oracle, and safe fallback
-# are all inherited unchanged.
-
-from collections import deque as _deque
-
 
 class SlidingWindowCombinatorialUCBAgent(CombinatorialUCBAgent):
     """
-    CombinatorialUCBAgent restricted to a trailing window of W ROUNDS
-    (Practical/10_nonstationary_bandits.ipynb cell 23, SW-UCB), applied per
-    (campaign, bid) cell.
+    CombinatorialUCBAgent with statistics restricted to a trailing window of W rounds.
 
-    The window is in TIME, not "last W pulls of this arm": an
-    under-explored cell must still forget stale data after W rounds, or
-    "recent" would silently mean "long ago" for it. O(1) amortised updates
-    via a shared deque of per-round records.
+    The window is over TIME, not per-arm pull counts: every cell forgets
+    observations older than W rounds regardless of how often that cell was
+    pulled. This allows adaptation to regime changes at the cost of higher
+    variance for infrequently-pulled arms. Window statistics are maintained in
+    O(1) amortised time per round via a shared deque of per-round records.
 
-    Confidence radius uses log(min(t, W)) -- the anytime-correct version:
-    before the window has even filled up (t < W), log(t) is the honest
-    bound, not the fully-warmed-up log(W).
+    Confidence radius uses log(min(t, W)) to remain valid before the window
+    fills up (t < W).
 
     Parameters
     ----------
     W : int, optional
-        Window length. Default: Practical/10 cell 34's rule of thumb
-        W = 2*sqrt(T). TUNE against the environment's regime-switch period
-        (see req4_config.SW_WINDOW): with sum(K_i) cells substantially
-        larger than the lab's toy K=3, the textbook default under-samples
-        and keeps "forgetting" cells that have not actually changed.
+        Window length. Default: 2 * sqrt(T). For environments with long
+        stationary blocks, setting W to the block length reduces variance
+        without sacrificing adaptability.
     """
 
-    def __init__(self, N, Ks, T, budget, values, conflict_edges=None, W=None):
+    def __init__(
+        self,
+        N: int,
+        Ks: list[int],
+        T: int,
+        budget: float,
+        values: list[float],
+        conflict_edges: list[tuple[int, int]] | None = None,
+        W: int | None = None,
+    ) -> None:
         super().__init__(N, Ks, T, budget, values, conflict_edges)
         self.W = int(W) if W is not None else int(2 * np.sqrt(T))
         if self.W < 1:
@@ -813,11 +814,11 @@ class SlidingWindowCombinatorialUCBAgent(CombinatorialUCBAgent):
         self.sum_f = [np.zeros(Ks[i]) for i in range(N)]
         self.sum_c = [np.zeros(Ks[i]) for i in range(N)]
         self.win_pulls = [np.zeros(Ks[i]) for i in range(N)]
-        self.history = _deque()
+        self.history: _deque = _deque()
 
         logger.info("SlidingWindowCombinatorialUCBAgent | window=%d", self.W)
 
-    def pull_arm(self):
+    def pull_arm(self) -> list:
         if self.budget < 1:
             self.A_t = [-1] * self.N
             return self.A_t
@@ -843,7 +844,7 @@ class SlidingWindowCombinatorialUCBAgent(CombinatorialUCBAgent):
         self.A_t = list(self.joint_actions[action_idx])
         return self.A_t
 
-    def update(self, utilities, costs):
+    def update(self, utilities: np.ndarray, costs: np.ndarray) -> None:
         record = []
         for i, k in enumerate(self.A_t):
             if k < 0:
@@ -854,7 +855,7 @@ class SlidingWindowCombinatorialUCBAgent(CombinatorialUCBAgent):
             self.sum_c[i][k] += c
             self.win_pulls[i][k] += 1
 
-            # Lifetime stats, diagnostics only.
+            # Lifetime stats kept for diagnostics only.
             self.N_pulls[i][k] += 1
             n = self.N_pulls[i][k]
             self.avg_f[i][k] += (f - self.avg_f[i][k]) / n
@@ -873,40 +874,61 @@ class SlidingWindowCombinatorialUCBAgent(CombinatorialUCBAgent):
 
 class CUSUMCombinatorialUCBAgent(CombinatorialUCBAgent):
     """
-    CombinatorialUCBAgent + a per-(campaign,bid) CUSUM change detector
-    (Practical/10_nonstationary_bandits.ipynb cell 46, CUSUM-UCB; Page,
-    1954).
+    CombinatorialUCBAgent with a per-(campaign, bid) CUSUM change detector.
 
-    Detection signal: the WIN INDICATOR w = 1[bid >= m_t], recovered
-    exactly from the semi-bandit (utility, cost) pair as
-    w = 1 if (utility + cost) > 0 else 0. This is the principled signal to
-    test for a shift: what actually changes across regimes is the win
-    PROBABILITY (m_t's distribution), not the campaign's fixed value.
+    Detects regime changes by running a Page (1954) CUSUM test on the win
+    indicator w = 1[bid >= m_t] for each cell independently. When a cell's
+    CUSUM statistic exceeds the threshold h, that cell's statistics are reset
+    so pull_arm treats it as unexplored again.
 
-    CUSUM statistic per cell, reset independently on detection:
-      - first M pulls after a (re)start build the reference mean mu0
-      - after that: g+ = max(0, g+ + (w - mu0 - eps))
-                    g- = max(0, g- + (mu0 - w - eps))
-        alarm if g+ > h or g- > h (eps is the standard CUSUM slack term
-        against mistaking noise for a shift, Page 1954).
+    Detection signal: the win indicator w = 1 if (utility + cost) > 0 else 0,
+    recoverable exactly from the semi-bandit (utility, cost) feedback. Using
+    the win indicator (a function of m_t's distribution) rather than the raw
+    utility (also affected by the fixed campaign value) keeps the detector
+    sensitive to distributional shifts in the competing bids.
 
-    On alarm: reset ONLY that cell's N_pulls/avg_f/avg_c to 0 -- pull_arm
-    (inherited unchanged) then treats it as unexplored again automatically.
+    CUSUM per cell
+    --------------
+    After M initial pulls establish a reference mean mu0:
+        g+ = max(0, g+ + (w - mu0 - eps))
+        g- = max(0, g- + (mu0 - w - eps))
+    Alarm fires if g+ > h or g- > h; on alarm the cell is fully reset.
 
-    Extra safety-net exploration (Practical/10 cell 46's alpha): with
-    probability alpha, ignore the LP and play a uniformly random FEASIBLE
-    joint action -- a guard against slow drifts too gradual for CUSUM to
-    flag.
+    Extra exploration
+    -----------------
+    With probability alpha, a uniformly random feasible joint action is played
+    regardless of the LP, serving as a safety net for slow drifts that CUSUM
+    may not detect promptly.
 
     Parameters
     ----------
     U_T : int
-        Prior upper bound on the number of regime changes any cell can
-        undergo -- used to derive M, h, alpha if not given explicitly.
+        Upper bound on the number of regime changes. Used to derive M, h,
+        and alpha if not provided explicitly.
+    M : int, optional
+        Burn-in period for the reference mean. Default: max(log(T/U_T), 5).
+    h : float, optional
+        Detection threshold. Default: 2 * log(T/U_T).
+    alpha : float, optional
+        Exploration probability. Default: sqrt(U_T * log(T/U_T) / T).
+    eps : float
+        CUSUM slack term. Default: 0.05.
     """
 
-    def __init__(self, N, Ks, T, budget, values, conflict_edges=None,
-                 U_T=5, M=None, h=None, alpha=None, eps=0.05):
+    def __init__(
+        self,
+        N: int,
+        Ks: list[int],
+        T: int,
+        budget: float,
+        values: list[float],
+        conflict_edges: list[tuple[int, int]] | None = None,
+        U_T: int = 5,
+        M: int | None = None,
+        h: float | None = None,
+        alpha: float | None = None,
+        eps: float = 0.05,
+    ) -> None:
         super().__init__(N, Ks, T, budget, values, conflict_edges)
 
         U_T = max(int(U_T), 1)
@@ -918,14 +940,14 @@ class CUSUMCombinatorialUCBAgent(CombinatorialUCBAgent):
 
         self.cell_history = [[[] for _ in range(Ks[i])] for i in range(N)]
         self.n_resets = [np.zeros(Ks[i]) for i in range(N)]
-        self.reset_log = []
+        self.reset_log: list[tuple[int, int, int]] = []
 
         logger.info(
             "CUSUMCombinatorialUCBAgent | N=%d Ks=%s T=%d U_T=%d M=%d h=%.3f alpha=%.4f eps=%.3f B=%.1f",
             N, Ks, T, U_T, self.M, self.h, self.alpha, self.eps, budget,
         )
 
-    def pull_arm(self):
+    def pull_arm(self) -> list:
         if self.budget < 1:
             self.A_t = [-1] * self.N
             return self.A_t
@@ -937,10 +959,11 @@ class CUSUMCombinatorialUCBAgent(CombinatorialUCBAgent):
 
         return super().pull_arm()
 
-    def update(self, utilities, costs):
+    def update(self, utilities: np.ndarray, costs: np.ndarray) -> None:
         for i, k in enumerate(self.A_t):
             if k < 0:
                 continue
+            # Win indicator: recoverable from (utility, cost) without needing m_t.
             w = 1.0 if (utilities[i] + costs[i]) > 1e-9 else 0.0
             self.cell_history[i][k].append(w)
             if self._change_detected(i, k):
@@ -948,7 +971,7 @@ class CUSUMCombinatorialUCBAgent(CombinatorialUCBAgent):
 
         super().update(utilities, costs)
 
-    def _change_detected(self, i, k):
+    def _change_detected(self, i: int, k: int) -> bool:
         hist = self.cell_history[i][k]
         if len(hist) <= self.M:
             return False
@@ -961,7 +984,7 @@ class CUSUMCombinatorialUCBAgent(CombinatorialUCBAgent):
                 return True
         return False
 
-    def _reset_cell(self, i, k):
+    def _reset_cell(self, i: int, k: int) -> None:
         self.avg_f[i][k] = 0.0
         self.avg_c[i][k] = 0.0
         self.N_pulls[i][k] = 0
