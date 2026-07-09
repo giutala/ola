@@ -270,7 +270,7 @@ class CombinatorialUCBAgent:
         self.N_pulls = [np.zeros(Ks[i]) for i in range(N)]
 
         self.joint_actions = self._build_joint_actions()
-        self.A_t: Optional[list] = None     # list of bid indices, one per campaign
+        self.A_t = None     # list of bid indices, one per campaign
         self.t = 0
 
         logger.info(
@@ -401,7 +401,6 @@ class CombinatorialUCBAgent:
         NB09 cell 30 update pattern: update all arms in A_t (semi-bandit).
         utilities, costs: np.ndarray shape (N,)
         """
-        assert self.A_t is not None, "pull_arm() must be called before update()"
         for i, k in enumerate(self.A_t):
             if k < 0:
                 continue
@@ -762,3 +761,210 @@ class PrimalDualMultiCampaignAgent:
             pickle.dump(self, f)
         logger.info("Saved agent to %s", path)
         return path
+
+
+# ---------------------------------------------------------------------------
+# Requirement 4 -- Combinatorial-UCB extended with a sliding window / CUSUM
+# ---------------------------------------------------------------------------
+#
+# Both classes subclass CombinatorialUCBAgent (Requirement 2, above) DIRECTLY
+# -- no workaround needed, since this file's CombinatorialUCBAgent is the
+# fixed version (empirical mean cost in the budget LP, no premature greedy
+# fallback -- see its own docstring / the "Budget-aware practical
+# constraint" comment in UCBLikeBiddingAgent above). Only the STATISTICS
+# feeding the LP change (windowed / since-last-reset instead of
+# full-history); the joint-action enumeration, LP oracle, and safe fallback
+# are all inherited unchanged.
+
+from collections import deque as _deque
+
+
+class SlidingWindowCombinatorialUCBAgent(CombinatorialUCBAgent):
+    """
+    CombinatorialUCBAgent restricted to a trailing window of W ROUNDS
+    (Practical/10_nonstationary_bandits.ipynb cell 23, SW-UCB), applied per
+    (campaign, bid) cell.
+
+    The window is in TIME, not "last W pulls of this arm": an
+    under-explored cell must still forget stale data after W rounds, or
+    "recent" would silently mean "long ago" for it. O(1) amortised updates
+    via a shared deque of per-round records.
+
+    Confidence radius uses log(min(t, W)) -- the anytime-correct version:
+    before the window has even filled up (t < W), log(t) is the honest
+    bound, not the fully-warmed-up log(W).
+
+    Parameters
+    ----------
+    W : int, optional
+        Window length. Default: Practical/10 cell 34's rule of thumb
+        W = 2*sqrt(T). TUNE against the environment's regime-switch period
+        (see req4_config.SW_WINDOW): with sum(K_i) cells substantially
+        larger than the lab's toy K=3, the textbook default under-samples
+        and keeps "forgetting" cells that have not actually changed.
+    """
+
+    def __init__(self, N, Ks, T, budget, values, conflict_edges=None, W=None):
+        super().__init__(N, Ks, T, budget, values, conflict_edges)
+        self.W = int(W) if W is not None else int(2 * np.sqrt(T))
+        if self.W < 1:
+            raise ValueError("W must be >= 1")
+
+        self.sum_f = [np.zeros(Ks[i]) for i in range(N)]
+        self.sum_c = [np.zeros(Ks[i]) for i in range(N)]
+        self.win_pulls = [np.zeros(Ks[i]) for i in range(N)]
+        self.history = _deque()
+
+        logger.info("SlidingWindowCombinatorialUCBAgent | window=%d", self.W)
+
+    def pull_arm(self):
+        if self.budget < 1:
+            self.A_t = [-1] * self.N
+            return self.A_t
+
+        log_term = np.log(min(max(self.t, 2), self.W))
+
+        f_ucb_list, cost_list = [], []
+        for i in range(self.N):
+            range_i = self.values[i]
+            n_i = self.win_pulls[i]
+            n_safe = np.maximum(n_i, 1)
+            avg_f_i = np.where(n_i == 0, 0.0, self.sum_f[i] / n_safe)
+            avg_c_i = np.where(n_i == 0, 0.0, self.sum_c[i] / n_safe)
+            beta_i = range_i * np.sqrt(2 * log_term / n_safe)
+
+            f_ucb_i = np.where(n_i == 0, range_i, np.minimum(range_i, avg_f_i + beta_i))
+            cost_i = np.maximum(0.0, avg_c_i)
+            f_ucb_list.append(f_ucb_i)
+            cost_list.append(cost_i)
+
+        gamma_t = self._solve_lp(f_ucb_list, cost_list)
+        action_idx = int(np.random.choice(len(self.joint_actions), p=gamma_t))
+        self.A_t = list(self.joint_actions[action_idx])
+        return self.A_t
+
+    def update(self, utilities, costs):
+        record = []
+        for i, k in enumerate(self.A_t):
+            if k < 0:
+                continue
+            f, c = float(utilities[i]), float(costs[i])
+            record.append((i, k, f, c))
+            self.sum_f[i][k] += f
+            self.sum_c[i][k] += c
+            self.win_pulls[i][k] += 1
+
+            # Lifetime stats, diagnostics only.
+            self.N_pulls[i][k] += 1
+            n = self.N_pulls[i][k]
+            self.avg_f[i][k] += (f - self.avg_f[i][k]) / n
+            self.avg_c[i][k] += (c - self.avg_c[i][k]) / n
+
+        self.history.append(record)
+        if len(self.history) > self.W:
+            for i, k, f, c in self.history.popleft():
+                self.sum_f[i][k] -= f
+                self.sum_c[i][k] -= c
+                self.win_pulls[i][k] -= 1
+
+        self.budget -= costs.sum()
+        self.t += 1
+
+
+class CUSUMCombinatorialUCBAgent(CombinatorialUCBAgent):
+    """
+    CombinatorialUCBAgent + a per-(campaign,bid) CUSUM change detector
+    (Practical/10_nonstationary_bandits.ipynb cell 46, CUSUM-UCB; Page,
+    1954).
+
+    Detection signal: the WIN INDICATOR w = 1[bid >= m_t], recovered
+    exactly from the semi-bandit (utility, cost) pair as
+    w = 1 if (utility + cost) > 0 else 0. This is the principled signal to
+    test for a shift: what actually changes across regimes is the win
+    PROBABILITY (m_t's distribution), not the campaign's fixed value.
+
+    CUSUM statistic per cell, reset independently on detection:
+      - first M pulls after a (re)start build the reference mean mu0
+      - after that: g+ = max(0, g+ + (w - mu0 - eps))
+                    g- = max(0, g- + (mu0 - w - eps))
+        alarm if g+ > h or g- > h (eps is the standard CUSUM slack term
+        against mistaking noise for a shift, Page 1954).
+
+    On alarm: reset ONLY that cell's N_pulls/avg_f/avg_c to 0 -- pull_arm
+    (inherited unchanged) then treats it as unexplored again automatically.
+
+    Extra safety-net exploration (Practical/10 cell 46's alpha): with
+    probability alpha, ignore the LP and play a uniformly random FEASIBLE
+    joint action -- a guard against slow drifts too gradual for CUSUM to
+    flag.
+
+    Parameters
+    ----------
+    U_T : int
+        Prior upper bound on the number of regime changes any cell can
+        undergo -- used to derive M, h, alpha if not given explicitly.
+    """
+
+    def __init__(self, N, Ks, T, budget, values, conflict_edges=None,
+                 U_T=5, M=None, h=None, alpha=None, eps=0.05):
+        super().__init__(N, Ks, T, budget, values, conflict_edges)
+
+        U_T = max(int(U_T), 1)
+        self.U_T = U_T
+        self.M = int(M) if M is not None else max(int(np.log(T / U_T)), 5)
+        self.h = float(h) if h is not None else 2.0 * np.log(T / U_T)
+        self.alpha = float(alpha) if alpha is not None else float(np.sqrt(U_T * np.log(T / U_T) / T))
+        self.eps = float(eps)
+
+        self.cell_history = [[[] for _ in range(Ks[i])] for i in range(N)]
+        self.n_resets = [np.zeros(Ks[i]) for i in range(N)]
+        self.reset_log = []
+
+        logger.info(
+            "CUSUMCombinatorialUCBAgent | N=%d Ks=%s T=%d U_T=%d M=%d h=%.3f alpha=%.4f eps=%.3f B=%.1f",
+            N, Ks, T, U_T, self.M, self.h, self.alpha, self.eps, budget,
+        )
+
+    def pull_arm(self):
+        if self.budget < 1:
+            self.A_t = [-1] * self.N
+            return self.A_t
+
+        if np.random.random() <= self.alpha:
+            idx = np.random.randint(len(self.joint_actions))
+            self.A_t = list(self.joint_actions[idx])
+            return self.A_t
+
+        return super().pull_arm()
+
+    def update(self, utilities, costs):
+        for i, k in enumerate(self.A_t):
+            if k < 0:
+                continue
+            w = 1.0 if (utilities[i] + costs[i]) > 1e-9 else 0.0
+            self.cell_history[i][k].append(w)
+            if self._change_detected(i, k):
+                self._reset_cell(i, k)
+
+        super().update(utilities, costs)
+
+    def _change_detected(self, i, k):
+        hist = self.cell_history[i][k]
+        if len(hist) <= self.M:
+            return False
+        mu0 = float(np.mean(hist[:self.M]))
+        gp = gm = 0.0
+        for w in hist[self.M:]:
+            gp = max(0.0, gp + (w - mu0 - self.eps))
+            gm = max(0.0, gm + (mu0 - w - self.eps))
+            if gp > self.h or gm > self.h:
+                return True
+        return False
+
+    def _reset_cell(self, i, k):
+        self.avg_f[i][k] = 0.0
+        self.avg_c[i][k] = 0.0
+        self.N_pulls[i][k] = 0
+        self.cell_history[i][k] = []
+        self.n_resets[i][k] += 1
+        self.reset_log.append((self.t, i, k))

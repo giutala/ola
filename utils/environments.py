@@ -386,6 +386,7 @@ class AdversarialMultiCampaignEnv:
 
         # Build the (N, T) sequence of m_t
         rng = np.random.default_rng(seed)
+        self.shock_blocks = None   # set by _build_shocks; used by piecewise_win_probabilities
         if mode == "drift":
             self.m = self._build_drift(rng)
         else:  # 'shocks'
@@ -426,6 +427,13 @@ class AdversarialMultiCampaignEnv:
         Piecewise-stationary in tiny blocks. n_regimes random (alpha, beta)
         pairs are pre-drawn at init; each block picks one uniformly at
         random and samples i.i.d. from it.
+
+        Also records the exact (start, end, alpha, beta) selected for every
+        (campaign, block) in self.shock_blocks -- no extra random draw, just
+        keeping what was already sampled -- so a distributional (piecewise
+        expected) clairvoyant can be computed analytically later without
+        needing to re-estimate the block distributions empirically. See
+        piecewise_win_probabilities().
         """
         T = self.T
         regime_means = rng.uniform(0.1, 0.9, size=self.n_regimes)
@@ -434,12 +442,16 @@ class AdversarialMultiCampaignEnv:
 
         m = np.empty((self.N, T))
         n_blocks = (T + self.block_size - 1) // self.block_size
+        self.shock_blocks = []
         for i in range(self.N):
+            campaign_blocks = []
             for b in range(n_blocks):
                 start = b * self.block_size
                 end = min(start + self.block_size, T)
                 a, bb = regimes[rng.integers(0, self.n_regimes)]
+                campaign_blocks.append((start, end, float(a), float(bb)))
                 m[i, start:end] = rng.beta(a, bb, size=end - start)
+            self.shock_blocks.append(campaign_blocks)
         return m
 
     # ---- Same interaction protocol as MultiCampaignEnv -------------------
@@ -488,6 +500,7 @@ class AdversarialMultiCampaignEnv:
         """Re-draw the m sequence and reset the round counter."""
         s = seed if seed is not None else self.seed
         rng = np.random.default_rng(s)
+        self.shock_blocks = None
         if self.mode == "drift":
             self.m = self._build_drift(rng)
         else:  # 'shocks'
@@ -505,6 +518,53 @@ class AdversarialMultiCampaignEnv:
             (self.bid_sets[i][:, None] >= self.m[i][None, :]).mean(axis=1)
             for i in range(self.N)
         ]
+
+    def piecewise_win_probabilities(self):
+        """
+        Analytical P(b >= m_i) per stationary block, for mode='shocks' only.
+
+        Unlike empirical_win_probabilities() (one estimate over the WHOLE
+        horizon -- appropriate for OPT^A, the best single fixed policy) or
+        the realised m_t themselves (used by the fully dynamic clairvoyant,
+        which additionally knows the specific round-by-round draw), this
+        uses the exact Beta(alpha, beta) parameters that generated each
+        block (recorded in self.shock_blocks) to compute the TRUE win
+        probability of every bid within that block analytically -- no
+        sampling noise, and no foreknowledge of the realised m_t.
+
+        This is the distributional ingredient needed for the piecewise
+        expected clairvoyant (see experiments.py's
+        compute_piecewise_expected_clairvoyant): an oracle that knows the
+        interval boundaries and each interval's true distribution, but not
+        the realised competing bids -- the natural benchmark for a
+        piecewise-stationary environment, and the one Sliding-Window /
+        CUSUM Combinatorial-UCB (Requirement 4) actually have tracking
+        guarantees against in the bandit literature (e.g. Garivier &
+        Moulines 2011 for SW-UCB), unlike OPT^A.
+
+        Returns
+        -------
+        list[tuple[int, int, list[np.ndarray]]]
+            One (start, end, win_prob_list) tuple per block, where
+            win_prob_list[i] is P(b >= m_i) for every b in self.bid_sets[i].
+        """
+        if self.mode != "shocks" or self.shock_blocks is None:
+            raise ValueError("piecewise_win_probabilities is only available for mode='shocks'.")
+
+        from scipy.stats import beta as beta_dist
+
+        n_blocks = len(self.shock_blocks[0])
+        out = []
+        for b in range(n_blocks):
+            start, end = self.shock_blocks[0][b][:2]
+            block_probs = []
+            for i in range(self.N):
+                i_start, i_end, alpha, beta_param = self.shock_blocks[i][b]
+                if (i_start, i_end) != (start, end):
+                    raise RuntimeError("Shock block boundaries are inconsistent across campaigns.")
+                block_probs.append(beta_dist.cdf(self.bid_sets[i], alpha, beta_param))
+            out.append((start, end, block_probs))
+        return out
 
     def save(self, name="adversarial_multi_campaign_env"):
         path = DATA_DIR / f"{name}.pkl"
