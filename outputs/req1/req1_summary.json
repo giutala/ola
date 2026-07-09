@@ -1,0 +1,64 @@
+[
+  {
+    "scenario": "generous",
+    "value": 0.8,
+    "T": 10000,
+    "trials": 30,
+    "n_competitors": 3,
+    "base_bid_grid": "np.linspace(0, 1, 11)",
+    "effective_bids": [
+      0.0,
+      0.1,
+      0.2,
+      0.30000000000000004,
+      0.4,
+      0.5,
+      0.6000000000000001,
+      0.7000000000000001,
+      0.8
+    ],
+    "budget": 1600.0,
+    "rho": 0.16,
+    "clairvoyant_expected_utility_per_round": 0.04320000000000001,
+    "clairvoyant_expected_cost_per_round": 0.12960000000000008,
+    "active_clairvoyant_distribution": [
+      [
+        0.6000000000000001,
+        1.0
+      ]
+    ]
+  },
+  {
+    "scenario": "tight",
+    "value": 0.8,
+    "T": 10000,
+    "trials": 30,
+    "n_competitors": 3,
+    "base_bid_grid": "np.linspace(0, 1, 11)",
+    "effective_bids": [
+      0.0,
+      0.1,
+      0.2,
+      0.30000000000000004,
+      0.4,
+      0.5,
+      0.6000000000000001,
+      0.7000000000000001,
+      0.8
+    ],
+    "budget": 400.0,
+    "rho": 0.04,
+    "clairvoyant_expected_utility_per_round": 0.030243902439024396,
+    "clairvoyant_expected_cost_per_round": 0.04,
+    "active_clairvoyant_distribution": [
+      [
+        0.4,
+        0.6097560975609758
+      ],
+      [
+        0.5,
+        0.39024390243902424
+      ]
+    ]
+  }
+]

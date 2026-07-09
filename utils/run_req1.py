@@ -12,10 +12,9 @@ two budget scenarios designed to isolate the effect of the budget constraint:
   - Tight (B=400, rho=0.04): constraint binding; UCB1 overspends while
     UCB-like respects the budget through its LP oracle.
 
-Note: this file uses a coarser bid grid (linspace(0,1,6)) compared to
-Requirements 2–4 (linspace(0,1,11)) so that the UCB gap-dependent behavior
-is clearly visible at T=10000. This is a deliberate, labelled choice within
-Requirement 1, not a change to the shared problem setting.
+This file uses the same base bid grid as Requirements 2–4:
+linspace(0,1,11), with bids above the campaign value filtered out by the
+environment.
 
 Call from the notebook: run_req1()
 """
@@ -48,11 +47,7 @@ VALUE = 0.8
 T = 10_000
 N_TRIALS = 30
 N_COMPETITORS = 3
-# Coarser grid keeps the assignment's "small discrete bid set" assumption and
-# makes the UCB gap-dependent behavior visible at T=10_000. With a 0.1 grid,
-# bids 0.5 and 0.6 have very close expected rewards, so finite-time bounds are
-# true but visually uninformative.
-AVAILABLE_BIDS = np.linspace(0, 1, 6)
+AVAILABLE_BIDS = np.linspace(0, 1, 11)
 
 # Two budget scenarios
 BUDGET_GENEROUS = 1600.0  # rho = 0.16  — non-binding; best bid cost is 0.1296

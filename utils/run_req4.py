@@ -8,7 +8,7 @@ BUDGET, T, and bid grid as Requirements 2 and 3, reparameterised for 5 long
 piecewise-stationary blocks (block_size=2000).
 
 Three strategies compared on the same environment:
-  1. SlidingWindowCombinatorialUCBAgent  — window W=2000 (one block length)
+  1. SlidingWindowCombinatorialUCBAgent  — window W=500 (one quarter block)
   2. CUSUMCombinatorialUCBAgent          — CUSUM detector on the win indicator
   3. PrimalDualMultiCampaignAgent        — Requirement 3 algorithm with
                                            Req4-specific learning rates

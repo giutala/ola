@@ -1,0 +1,55 @@
+scenario,budget,rho,series,bid,probability_or_fraction
+generous,1600.0,0.16,Clairvoyant LP,0.0,0.0
+generous,1600.0,0.16,Clairvoyant LP,0.1,0.0
+generous,1600.0,0.16,Clairvoyant LP,0.2,0.0
+generous,1600.0,0.16,Clairvoyant LP,0.30000000000000004,0.0
+generous,1600.0,0.16,Clairvoyant LP,0.4,0.0
+generous,1600.0,0.16,Clairvoyant LP,0.5,-0.0
+generous,1600.0,0.16,Clairvoyant LP,0.6000000000000001,1.0
+generous,1600.0,0.16,Clairvoyant LP,0.7000000000000001,0.0
+generous,1600.0,0.16,Clairvoyant LP,0.8,0.0
+generous,1600.0,0.16,UCB1 empirical seed 0,0.0,0.076
+generous,1600.0,0.16,UCB1 empirical seed 0,0.1,0.076
+generous,1600.0,0.16,UCB1 empirical seed 0,0.2,0.0769
+generous,1600.0,0.16,UCB1 empirical seed 0,0.30000000000000004,0.0891
+generous,1600.0,0.16,UCB1 empirical seed 0,0.4,0.1073
+generous,1600.0,0.16,UCB1 empirical seed 0,0.5,0.1653
+generous,1600.0,0.16,UCB1 empirical seed 0,0.6000000000000001,0.1899
+generous,1600.0,0.16,UCB1 empirical seed 0,0.7000000000000001,0.1435
+generous,1600.0,0.16,UCB1 empirical seed 0,0.8,0.076
+generous,1600.0,0.16,UCB-like empirical seed 0,0.0,0.0771
+generous,1600.0,0.16,UCB-like empirical seed 0,0.1,0.0783
+generous,1600.0,0.16,UCB-like empirical seed 0,0.2,0.0791
+generous,1600.0,0.16,UCB-like empirical seed 0,0.30000000000000004,0.0963
+generous,1600.0,0.16,UCB-like empirical seed 0,0.4,0.1191
+generous,1600.0,0.16,UCB-like empirical seed 0,0.5,0.1541
+generous,1600.0,0.16,UCB-like empirical seed 0,0.6000000000000001,0.1646
+generous,1600.0,0.16,UCB-like empirical seed 0,0.7000000000000001,0.1543
+generous,1600.0,0.16,UCB-like empirical seed 0,0.8,0.0771
+tight,400.0,0.04,Clairvoyant LP,0.0,0.0
+tight,400.0,0.04,Clairvoyant LP,0.1,0.0
+tight,400.0,0.04,Clairvoyant LP,0.2,0.0
+tight,400.0,0.04,Clairvoyant LP,0.30000000000000004,0.0
+tight,400.0,0.04,Clairvoyant LP,0.4,0.6097560975609758
+tight,400.0,0.04,Clairvoyant LP,0.5,0.39024390243902424
+tight,400.0,0.04,Clairvoyant LP,0.6000000000000001,0.0
+tight,400.0,0.04,Clairvoyant LP,0.7000000000000001,0.0
+tight,400.0,0.04,Clairvoyant LP,0.8,0.0
+tight,400.0,0.04,UCB1 empirical seed 0,0.0,0.076
+tight,400.0,0.04,UCB1 empirical seed 0,0.1,0.076
+tight,400.0,0.04,UCB1 empirical seed 0,0.2,0.0769
+tight,400.0,0.04,UCB1 empirical seed 0,0.30000000000000004,0.0891
+tight,400.0,0.04,UCB1 empirical seed 0,0.4,0.1073
+tight,400.0,0.04,UCB1 empirical seed 0,0.5,0.1653
+tight,400.0,0.04,UCB1 empirical seed 0,0.6000000000000001,0.1899
+tight,400.0,0.04,UCB1 empirical seed 0,0.7000000000000001,0.1435
+tight,400.0,0.04,UCB1 empirical seed 0,0.8,0.076
+tight,400.0,0.04,UCB-like empirical seed 0,0.0,0.1282
+tight,400.0,0.04,UCB-like empirical seed 0,0.1,0.1296
+tight,400.0,0.04,UCB-like empirical seed 0,0.2,0.1345
+tight,400.0,0.04,UCB-like empirical seed 0,0.30000000000000004,0.1604
+tight,400.0,0.04,UCB-like empirical seed 0,0.4,0.1667
+tight,400.0,0.04,UCB-like empirical seed 0,0.5,0.1461
+tight,400.0,0.04,UCB-like empirical seed 0,0.6000000000000001,0.0862
+tight,400.0,0.04,UCB-like empirical seed 0,0.7000000000000001,0.0371
+tight,400.0,0.04,UCB-like empirical seed 0,0.8,0.0112

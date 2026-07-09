@@ -58,7 +58,7 @@ Requirements 2–4 all operate on the **same** problem instance, defined in `uti
 | Competitors per campaign | 3 (each) |
 | Conflict edges | (0,1), (2,3) |
 
-Requirement 1 uses the same T and ρ (generous scenario) or ρ=0.04 (tight scenario), but a single campaign and a coarser bid grid (linspace(0,1,6)) to make gap-dependent UCB behaviour visible at T=10 000.
+Requirement 1 uses the same base bid grid, `linspace(0, 1, 11)`, but with a single campaign. Because the campaign value is `v=0.8`, `SingleCampaignEnv` filters the effective bid set to `{0.0, 0.1, ..., 0.8}`. The generous scenario keeps ρ=0.16, while the tight scenario uses ρ=0.04 to make the budget constraint binding.
 
 ---
 
@@ -71,7 +71,7 @@ Requirement 1 uses the same T and ρ (generous scenario) or ρ=0.04 (tight scena
 **Agents:**
 
 - **UCB1** (`UCB1BiddingAgent`) — budget-unaware; treats each bid level as a MAB arm; maximises cumulative utility with no budget constraint.
-- **UCB-like** (`UCBLikeBiddingAgent`) — budget-aware; maintains UCB on reward and LCB on cost, solves a 1-campaign LP at each round to find the budget-feasible randomised bid.
+- **UCB-like** (`UCBLikeBiddingAgent`) — budget-aware; maintains optimistic reward estimates and empirical cost estimates, then solves a 1-campaign LP at each round to find the budget-feasible randomised bid.
 
 **Two budget scenarios** (deliberately different within Requirement 1, to illustrate the role of the constraint):
 
@@ -88,7 +88,7 @@ Requirement 1 uses the same T and ρ (generous scenario) or ρ=0.04 (tight scena
 
 **Environment:** `MultiCampaignEnv` — N=4 independent first-price auctions with a shared budget B=1600 and a conflict graph (campaigns 0–1 and 2–3 are pairwise exclusive).
 
-**Agent:** `CombinatorialUCBAgent` — extends the single-campaign UCB-like approach to N campaigns.  At each round it builds UCB/LCB confidence bounds per (campaign, bid) cell, solves a joint LP over all N campaigns subject to the shared budget and conflict-graph constraints, then samples a feasible joint action.
+**Agent:** `CombinatorialUCBAgent` — extends the single-campaign UCB-like approach to N campaigns. At each round it builds optimistic utility estimates and empirical cost estimates per (campaign, bid) cell, solves a joint LP over all N campaigns subject to the shared budget and conflict-graph constraints, then samples a feasible joint action.
 
 **Clairvoyant benchmark:** `compute_clairvoyant_multi` — LP optimum over the true win probabilities with the shared budget constraint and conflict edges.
 
@@ -122,9 +122,9 @@ The dynamic (prophet) clairvoyant — which knows every realised competing bid m
 
 **Agents:**
 
-- `SlidingWindowCombinatorialUCBAgent` — trailing window W=2 000 (one block length); discards observations older than W rounds.
+- `SlidingWindowCombinatorialUCBAgent` — trailing window W=500 (one quarter of a block); discards observations older than W rounds so stale data is flushed quickly after regime changes.
 - `CUSUMCombinatorialUCBAgent` — per-cell Page (1954) CUSUM change detector on the win indicator; resets statistics when a change is detected.
-- `PrimalDualMultiCampaignAgent` — Requirement 3 agent included as a reference point (`budget_pacing=True`, `ogd_eta=0.017`).
+- `PrimalDualMultiCampaignAgent` — Requirement 3 agent included as a reference point, retuned for the shocks environment (`budget_pacing=True`, `hedge_eta=0.16`, `ogd_eta=0.003`).
 
 **Benchmark hierarchy:**
 
@@ -138,13 +138,13 @@ The piecewise expected clairvoyant is the natural target for SW-UCB and CUSUM-UC
 
 **Results (mean over 20 trials, T=10 000):**
 
-| Agent | Regret vs Piecewise | Regret vs OPT^A | Regret vs Prophet |
-|-------|---------------------|-----------------|-------------------|
-| CUSUM Combinatorial-UCB | **1 443.90** | **644.55** | **2 717.49** |
-| Sliding-Window Combinatorial-UCB | 1 532.01 | 732.66 | 2 805.60 |
-| Primal-Dual (Req 3) | 1 777.40 | 978.05 | 3 050.99 |
+| Agent | Regret vs Piecewise | Regret vs OPT^A | Regret vs Prophet | Final cost |
+|-------|---------------------|-----------------|-------------------|------------|
+| Primal-Dual (Req 3) | **1 426.10** | **626.75** | **2 699.69** | 1 456.37 / 1 600 |
+| CUSUM Combinatorial-UCB | 1 429.43 | 630.08 | 2 703.02 | 1 598.70 / 1 600 |
+| Sliding-Window Combinatorial-UCB | 1 950.41 | 1 151.06 | 3 224.00 | 1 599.23 / 1 600 |
 
-The ranking is identical under all three benchmarks. Primal-Dual's higher regret is driven by budget under-utilisation (~74.6% of B spent vs ~99.8% for the other two).
+The ranking is identical under all three benchmarks in this final run: Primal-Dual and CUSUM are essentially tied, with Primal-Dual slightly lower in regret but more conservative in budget usage. Sliding-Window is worse with W=500 because it adapts quickly after shocks but keeps fewer samples during each stationary block.
 
 ---
 
