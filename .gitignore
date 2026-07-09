@@ -221,9 +221,6 @@ __pycache__/
 # Jupyter
 .ipynb_checkpoints/
 
-# Data & outputs (generated at runtime)
-data/picklefiles/
-outputs/
 
 # OS
 .DS_Store
