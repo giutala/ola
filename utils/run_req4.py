@@ -10,7 +10,8 @@ piecewise-stationary blocks (block_size=2000).
 Three strategies compared on the same environment:
   1. SlidingWindowCombinatorialUCBAgent  — window W=2000 (one block length)
   2. CUSUMCombinatorialUCBAgent          — CUSUM detector on the win indicator
-  3. PrimalDualMultiCampaignAgent        — Requirement 3 agent, budget_pacing=True
+  3. PrimalDualMultiCampaignAgent        — Requirement 3 algorithm with
+                                           Req4-specific learning rates
 
 Three benchmarks reported:
   - PRIMARY   : piecewise expected clairvoyant — knows block boundaries and true
@@ -52,10 +53,15 @@ CLAIRVOYANT_CACHE_KEY = make_cache_key(mode="shocks", mode_params=SHOCKS_MODE_PA
 # Budget pacing: rho_t = remaining_budget / remaining_rounds (adaptive).
 BUDGET_PACING = True
 
-# OGD learning rate for the dual variable lambda. Tuned empirically via
-# tune_ogd_eta() on the 'shocks' environment with budget_pacing=True;
-# the same value was found independently optimal for 'drift' in run_req3.py.
-PD_OGD_ETA = 0.017
+# Requirement-4-specific Primal-Dual learning rates. The shocks environment
+# needs faster primal adaptation than Req3's drift setting. A grid over
+# hedge_eta in {default, 0.03, 0.06, 0.10, 0.16, 0.25} and ogd_eta in
+# {0.001, 0.003, 0.006, 0.010, 0.017, 0.030} selected this pair as a good
+# regret/budget compromise: lower regret than the Req3-style default while
+# spending substantially more budget. Forcing exact budget exhaustion would
+# require a different catch-up objective, not just a learning-rate change.
+PD_HEDGE_ETA = 0.16
+PD_OGD_ETA = 0.003
 
 # CUSUM per-cell detection parameters. The theory default h=2*log(T/U_T)≈15.6
 # is calibrated for T=10000 total rounds, but each (campaign, bid) cell is
@@ -68,17 +74,18 @@ CUSUM_H = 8.0
 CUSUM_EPS = 0.02
 
 
-def run_req4(pd_ogd_eta=None, n_trials=None):
+def run_req4(pd_ogd_eta=None, pd_hedge_eta=None, n_trials=None):
     eta = pd_ogd_eta if pd_ogd_eta is not None else PD_OGD_ETA
+    hedge_eta = pd_hedge_eta if pd_hedge_eta is not None else PD_HEDGE_ETA
     trials = n_trials if n_trials is not None else N_TRIALS
 
     logger.info("=" * 60)
     logger.info("Requirement 4 - Slightly Non-Stationary, Multiple Campaigns")
     logger.info("=" * 60)
     logger.info("Parameters | N=%d T=%d B=%.1f rho=%.4f n_intervals=%d block_size=%d "
-                "sw_window=%d U_T=%d pd_ogd_eta=%.4f budget_pacing=%s trials=%d",
+                "sw_window=%d U_T=%d pd_hedge_eta=%.4f pd_ogd_eta=%.4f budget_pacing=%s trials=%d",
                 len(VALUES), T, BUDGET, BUDGET / T, N_INTERVALS, BLOCK_SIZE,
-                SW_WINDOW, U_T, eta, BUDGET_PACING, trials)
+                SW_WINDOW, U_T, hedge_eta, eta, BUDGET_PACING, trials)
 
     (OUTPUTS_DIR / "r4").mkdir(parents=True, exist_ok=True)
 
@@ -110,7 +117,8 @@ def run_req4(pd_ogd_eta=None, n_trials=None):
     def make_pd_agent():
         return PrimalDualMultiCampaignAgent(
             N=N, Ks=Ks, bid_sets=bid_sets, T=T, budget=BUDGET, values=VALUES,
-            conflict_edges=CONFLICT_EDGES, ogd_eta=eta, budget_pacing=BUDGET_PACING,
+            conflict_edges=CONFLICT_EDGES, hedge_eta=hedge_eta,
+            ogd_eta=eta, budget_pacing=BUDGET_PACING,
         )
 
     cache = load_clairvoyant_cache(CLAIRVOYANT_CACHE_KEY)
@@ -133,8 +141,11 @@ def run_req4(pd_ogd_eta=None, n_trials=None):
     res_cusum = run_nonstationary_trials(env_factory, make_cusum_agent, trials,
                                           name="req4_cusum_cucb", **common_kwargs)
 
-    logger.info("-" * 60); logger.info("Primal-Dual (Requirement 3, budget_pacing=%s, ogd_eta=%.4f)",
-                                        BUDGET_PACING, eta)
+    logger.info("-" * 60)
+    logger.info(
+        "Primal-Dual (Req4-tuned, budget_pacing=%s, hedge_eta=%.4f, ogd_eta=%.4f)",
+        BUDGET_PACING, hedge_eta, eta,
+    )
     res_pd = run_nonstationary_trials(env_factory, make_pd_agent, trials,
                                        name="req4_primal_dual", **common_kwargs)
 
