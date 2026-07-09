@@ -57,17 +57,28 @@ BUDGET_PACING = True
 # the same value was found independently optimal for 'drift' in run_req3.py.
 PD_OGD_ETA = 0.017
 
+# CUSUM per-cell detection parameters. The theory default h=2*log(T/U_T)≈15.6
+# is calibrated for T=10000 total rounds, but each (campaign, bid) cell is
+# pulled at ~10% of rounds, giving ~200 pulls/cell/block.  At h=15.6 with
+# eps=0.05 a shift of Δp=0.1 requires ~313 per-cell pulls to detect — more
+# than one full block.  h=8.0 with eps=0.02 reduces that to ~100 pulls,
+# fitting comfortably inside the 2000-round block while keeping the expected
+# false-alarm interval above 1/exp(8)≈1/3000 per pull (≈0.3 false alarms/cell/trial).
+CUSUM_H = 8.0
+CUSUM_EPS = 0.02
 
-def run_req4(pd_ogd_eta=None):
+
+def run_req4(pd_ogd_eta=None, n_trials=None):
     eta = pd_ogd_eta if pd_ogd_eta is not None else PD_OGD_ETA
+    trials = n_trials if n_trials is not None else N_TRIALS
 
     logger.info("=" * 60)
     logger.info("Requirement 4 - Slightly Non-Stationary, Multiple Campaigns")
     logger.info("=" * 60)
     logger.info("Parameters | N=%d T=%d B=%.1f rho=%.4f n_intervals=%d block_size=%d "
-                "sw_window=%d U_T=%d pd_ogd_eta=%.4f budget_pacing=%s",
+                "sw_window=%d U_T=%d pd_ogd_eta=%.4f budget_pacing=%s trials=%d",
                 len(VALUES), T, BUDGET, BUDGET / T, N_INTERVALS, BLOCK_SIZE,
-                SW_WINDOW, U_T, eta, BUDGET_PACING)
+                SW_WINDOW, U_T, eta, BUDGET_PACING, trials)
 
     (OUTPUTS_DIR / "r4").mkdir(parents=True, exist_ok=True)
 
@@ -93,6 +104,7 @@ def run_req4(pd_ogd_eta=None):
         return CUSUMCombinatorialUCBAgent(
             N=N, Ks=Ks, T=T, budget=BUDGET, values=VALUES,
             conflict_edges=CONFLICT_EDGES, U_T=U_T,
+            h=CUSUM_H, eps=CUSUM_EPS,
         )
 
     def make_pd_agent():
@@ -114,16 +126,16 @@ def run_req4(pd_ogd_eta=None):
     common_kwargs = dict(clairvoyant_cache=cache or None, compute_opt_a=True, compute_piecewise=True)
 
     logger.info("-" * 60); logger.info("Sliding-Window Combinatorial-UCB")
-    res_sw = run_nonstationary_trials(env_factory, make_sw_agent, N_TRIALS,
+    res_sw = run_nonstationary_trials(env_factory, make_sw_agent, trials,
                                        name="req4_sw_cucb", **common_kwargs)
 
     logger.info("-" * 60); logger.info("CUSUM Combinatorial-UCB")
-    res_cusum = run_nonstationary_trials(env_factory, make_cusum_agent, N_TRIALS,
+    res_cusum = run_nonstationary_trials(env_factory, make_cusum_agent, trials,
                                           name="req4_cusum_cucb", **common_kwargs)
 
     logger.info("-" * 60); logger.info("Primal-Dual (Requirement 3, budget_pacing=%s, ogd_eta=%.4f)",
                                         BUDGET_PACING, eta)
-    res_pd = run_nonstationary_trials(env_factory, make_pd_agent, N_TRIALS,
+    res_pd = run_nonstationary_trials(env_factory, make_pd_agent, trials,
                                        name="req4_primal_dual", **common_kwargs)
 
     results = {
@@ -171,7 +183,7 @@ def run_req4(pd_ogd_eta=None):
                     filename="r4/req4_lambda.png")
 
     logger.info("=" * 60)
-    logger.info("Final regret (mean over %d trials):", N_TRIALS)
+    logger.info("Final regret (mean over %d trials):", trials)
     logger.info("  %-22s %10s %10s %10s", "", "piecewise", "OPT^A", "prophet")
     for label, res in results.items():
         pw = res.get("mean_regret_piecewise", [float("nan")])[-1]

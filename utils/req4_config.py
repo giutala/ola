@@ -28,11 +28,13 @@ N_INTERVALS = 5
 BLOCK_SIZE = T // N_INTERVALS          # 2000
 U_T = N_INTERVALS - 1                  # upper bound on regime changes (feeds CUSUM)
 
-# Sliding-window length tied to the block length rather than the textbook
-# W = 2*sqrt(T) ≈ 200: with sum(K_i) cells much larger than a toy K=3 bandit,
-# W≈200 evicts a cell's samples before the LP accumulates enough mass,
-# causing pure window churn rather than adaptation.
-SW_WINDOW = BLOCK_SIZE
+# Sliding-window length: 1/4 of block length balances two opposing constraints.
+# W too small (textbook W≈2√T≈200) evicts a cell's samples before the LP has
+# enough observations; W too large (W=BLOCK_SIZE) means the window never fully
+# flushes within a block, leaving no stable exploitation phase.
+# W=BLOCK_SIZE//4=500 flushes stale data in the first ~500 rounds after each
+# regime change, leaving ~1500 rounds of fresh observations for exploitation.
+SW_WINDOW = BLOCK_SIZE // 4
 
 ADVERSARIAL_ENV_CLASS_NAME = "AdversarialMultiCampaignEnv"
 SHOCKS_MODE_PARAMS = dict(block_size=BLOCK_SIZE, n_regimes=N_INTERVALS)
