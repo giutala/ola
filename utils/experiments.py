@@ -870,6 +870,7 @@ def plot_lambda(results: dict, title: str = r"Lagrange multiplier $\lambda_t$", 
     path.parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(path, dpi=150)
     logger.info("Saved plot to %s", path)
+    plt.show()
     plt.close()
 
 

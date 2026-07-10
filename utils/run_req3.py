@@ -178,38 +178,6 @@ def run_req3():
     )
 
     # ─────────────────────────────────────────────────────────────────────
-    # Annotated regret: highlight that the SAME agent achieves sublinear
-    # regret in BOTH regimes.  This is the punchline of Requirement 3.
-    # ─────────────────────────────────────────────────────────────────────
-    fig, ax = plt.subplots(figsize=(9, 5))
-    ts = np.arange(1, T + 1)
-    for label, res, color in [
-        ("Stochastic",  res_stoch, "C0"),
-        ("Adversarial", res_adv,   "C1"),
-    ]:
-        mean   = res["mean_regret"]
-        stderr = res["std_regret"] / np.sqrt(res["n_trials"])
-        ax.plot(ts, mean, label=label, color=color)
-        ax.fill_between(ts, mean - stderr, mean + stderr, alpha=0.25, color=color)
-
-    # O(sqrt(T)) reference, scaled to the adversarial curve (the harder one)
-    ref = np.sqrt(ts)
-    ref = ref * (res_adv["mean_regret"][-1] / ref[-1])
-    ax.plot(ts, ref, "k--", linewidth=1.2, label=r"$O(\sqrt{T})$")
-
-    ax.set_xlabel("$t$")
-    ax.set_ylabel("Cumulative Pseudo-Regret")
-    ax.set_title("Req 3 – Best-of-both-worlds: same agent, two regimes")
-    ax.legend()
-    ax.grid(True, linestyle="--", alpha=0.4)
-    plt.tight_layout()
-    path = OUTPUTS_DIR / "r3" / "req3_regret_annotated.png"
-    plt.savefig(path, dpi=150)
-    logger.info("Saved annotated plot to %s", path)
-    plt.show()
-    plt.close()
-
-    # ─────────────────────────────────────────────────────────────────────
     # Final summary
     # ─────────────────────────────────────────────────────────────────────
     logger.info("=" * 60)
