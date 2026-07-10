@@ -19,13 +19,8 @@ PrimalDualMultiCampaignAgent learning-rate configuration changes:
 import logging
 from pathlib import Path
 
-import matplotlib
-
-matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
-
-plt.show = lambda *args, **kwargs: None
 
 from utils.agents import PrimalDualMultiCampaignAgent
 from utils.environments import AdversarialMultiCampaignEnv
@@ -233,5 +228,14 @@ def run_req4_pd_req3_eta(n_trials: int | None = None):
 
 
 if __name__ == "__main__":
+    # Non-interactive backend + no-op show(): safe here because this only
+    # affects a standalone `python -m utils.run_req4_pd_req3_eta` process,
+    # never a notebook kernel where importing this module must not silently
+    # disable inline plot display for unrelated later cells.
+    import matplotlib
+
+    matplotlib.use("Agg")
+    plt.show = lambda *args, **kwargs: None
+
     logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(message)s")
     run_req4_pd_req3_eta()
