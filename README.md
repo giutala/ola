@@ -67,7 +67,7 @@ Requirement 1 uses the same base bid grid, `linspace(0, 1, 11)`, but with a sing
 
 ### Requirement 1 – Single campaign, stochastic environment
 
-**Environment:** `SingleCampaignEnv` — first-price auction, competing bids i.i.d. from Beta(k, 1) where k is the number of competitors.
+**Environment:** `SingleCampaignEnv` — first-price auction; each competitor bid is i.i.d. Uniform[0,1], so the highest competing bid m_t has distribution Beta(k, 1), where k is the number of competitors.
 
 **Agents:**
 
