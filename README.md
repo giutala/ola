@@ -33,6 +33,7 @@ ola/
 │   ├── run_req2.py                        ← Requirement 2 pipeline
 │   ├── run_req3.py                        ← Requirement 3 pipeline
 │   ├── run_req4.py                        ← Requirement 4 pipeline
+│   ├── run_req4_pd_req3_eta.py            ← Req4 ablation: Primal-Dual with Req3 vs Req4 learning rates
 │   ├── precomputed_clairvoyant.py         ← one-shot cache builder for req3 dynamic clairvoyant
 │   └── precompute_clairvoyant_req4.py     ← one-shot cache builder for req4 dynamic clairvoyant
 ├── data/picklefiles/                      ← cached clairvoyant LP solutions
@@ -141,10 +142,12 @@ The piecewise expected clairvoyant is the natural target for SW-UCB and CUSUM-UC
 | Agent | Regret vs Piecewise | Regret vs OPT^A | Regret vs Prophet | Final cost |
 |-------|---------------------|-----------------|-------------------|------------|
 | Primal-Dual (Req 3) | **1 426.10** | **626.75** | **2 699.69** | 1 456.37 / 1 600 |
-| CUSUM Combinatorial-UCB | 1 429.43 | 630.08 | 2 703.02 | 1 598.70 / 1 600 |
-| Sliding-Window Combinatorial-UCB | 1 950.41 | 1 151.06 | 3 224.00 | 1 599.23 / 1 600 |
+| CUSUM Combinatorial-UCB | 1 430.04 | 630.69 | 2 703.63 | 1 599.28 / 1 600 |
+| Sliding-Window Combinatorial-UCB | 1 947.63 | 1 148.28 | 3 221.22 | 1 599.22 / 1 600 |
 
 The ranking is identical under all three benchmarks in this final run: Primal-Dual and CUSUM are essentially tied, with Primal-Dual slightly lower in regret but more conservative in budget usage. Sliding-Window is worse with W=500 because it adapts quickly after shocks but keeps fewer samples during each stationary block.
+
+**Is the budget under-use a tuning artefact?** `run_req4_pd_req3_eta.py` (and the corresponding cells in `req4_slightly_nonstationary.ipynb`) re-runs Primal-Dual on the same shocks environment with the *unmodified* Requirement 3 learning rates (default `hedge_eta`, `ogd_eta=0.017`) and compares it against the Req4-tuned configuration above. Retuning narrows the gap (regret 1 777 → 1 426, cost 74.6% → 91.0% of budget) but never closes it — neither configuration reaches the ~99.9% budget usage of CUSUM/Sliding-Window, which is consistent with Primal-Dual's static-regret guarantee (best fixed distribution in hindsight) rather than the tracking-regret guarantee that SW-UCB and CUSUM-UCB are designed for.
 
 ---
 
